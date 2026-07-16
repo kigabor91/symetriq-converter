@@ -1,0 +1,7 @@
+node_modules/
+
+input/*
+output/*
+
+!input/README.md
+!output/README.md
