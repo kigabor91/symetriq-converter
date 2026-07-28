@@ -39,6 +39,12 @@ export interface SymetriqMetadata {
     levels: SymetriqLevel[];
 }
 
+export interface MetadataDeduplicationStats {
+    inputPropertySets: number;
+    outputPropertySets: number;
+    deduplicatedPropertySets: number;
+}
+
 const ifcGuidCharacters = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$";
 
 type WebIFC = typeof WebIFCModule;
@@ -147,6 +153,61 @@ export function mapMetadataToGlbNodes(
     return {
         ...metadata,
         elements,
+    };
+}
+
+/**
+ * Consolidates byte-for-byte equivalent PropertySet payloads.
+ *
+ * Revit IFC exports commonly create a separate IFC PropertySet instance for
+ * every element, even where its name, type and every property are identical.
+ * The Viewer only resolves a PropertySet through an element's
+ * `propertySetIds`, so those references can safely point to the first
+ * equivalent instance. Element IDs, names, categories and all displayed
+ * property values remain unchanged.
+ */
+export function deduplicateMetadataPropertySets(
+    metadata: SymetriqMetadata,
+): { metadata: SymetriqMetadata; stats: MetadataDeduplicationStats } {
+    const canonicalIdBySignature = new Map<string, string>();
+    const canonicalIdByOriginalId = new Map<string, string>();
+    const propertySets: Record<string, SymetriqPropertySet> = {};
+
+    for (const [propertySetId, propertySet] of Object.entries(metadata.propertySets)) {
+        const signature = JSON.stringify({
+            name: propertySet.name,
+            type: propertySet.type,
+            properties: propertySet.properties,
+        });
+        const canonicalId = canonicalIdBySignature.get(signature) ?? propertySetId;
+        canonicalIdBySignature.set(signature, canonicalId);
+        canonicalIdByOriginalId.set(propertySetId, canonicalId);
+        if (!propertySets[canonicalId]) {
+            propertySets[canonicalId] = propertySet;
+        }
+    }
+
+    const elements = Object.fromEntries(
+        Object.entries(metadata.elements).map(([elementId, element]) => [
+            elementId,
+            {
+                ...element,
+                propertySetIds: element.propertySetIds.map(
+                    (propertySetId) => canonicalIdByOriginalId.get(propertySetId) ?? propertySetId,
+                ),
+            },
+        ]),
+    );
+    const inputPropertySets = Object.keys(metadata.propertySets).length;
+    const outputPropertySets = Object.keys(propertySets).length;
+
+    return {
+        metadata: { ...metadata, elements, propertySets },
+        stats: {
+            inputPropertySets,
+            outputPropertySets,
+            deduplicatedPropertySets: inputPropertySets - outputPropertySets,
+        },
     };
 }
 

@@ -5,7 +5,11 @@ import * as WebIFC from "web-ifc";
 import { convertIfcToGlb } from "./ifcConvert.js";
 import { optimizeGlbForXkt, type GlbOptimizationStats } from "./glbOptimize.js";
 import { extractCoordinateReference, type CoordinateReference } from "./coordinateReference.js";
-import { extractMetadata, mapMetadataToGlbNodes } from "./metadata.js";
+import {
+    deduplicateMetadataPropertySets,
+    extractMetadata,
+    mapMetadataToGlbNodes,
+} from "./metadata.js";
 
 export interface ConversionResult {
     id: string;
@@ -65,12 +69,17 @@ export async function convertIfc(
     console.log(`GLB: ${(optimization.inputBytes / 1024 / 1024).toFixed(2)} MB -> ${(optimization.outputBytes / 1024 / 1024).toFixed(2)} MB (${savedBytes >= 0 ? "saved" : "added"} ${(Math.abs(savedBytes) / 1024 / 1024).toFixed(2)} MB)`);
 
     console.log("Step 3/4: Extracting IFC metadata...");
-    const metadata = mapMetadataToGlbNodes(
+    const mappedMetadata = mapMetadataToGlbNodes(
         await extractMetadata(WebIFC, inputFile),
         glbPath,
     );
+    const { metadata, stats: metadataDeduplication } = deduplicateMetadataPropertySets(mappedMetadata);
     if (signal?.aborted) throw new Error("Conversion cancelled.");
     fs.writeFileSync(metadataPath, JSON.stringify(metadata));
+    console.log(
+        `Metadata PropertySets: ${metadataDeduplication.inputPropertySets} -> ${metadataDeduplication.outputPropertySets} `
+        + `(${metadataDeduplication.deduplicatedPropertySets} duplicates removed).`,
+    );
 
     console.log("Step 4/4: Converting GLB to XKT...");
     await convert2xkt({
