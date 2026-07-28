@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as WebIFC from "web-ifc";
 import { convertIfcToGlb } from "./ifcConvert.js";
 import { optimizeGlbForXkt, type GlbOptimizationStats } from "./glbOptimize.js";
+import { createCompressedAssetVariants } from "./assetCompression.js";
 import { extractCoordinateReference, type CoordinateReference } from "./coordinateReference.js";
 import {
     deduplicateMetadataPropertySets,
@@ -57,18 +58,18 @@ export async function convertIfc(
     const modelOffset = coordinateReference
         ? coordinateReference.origin.map((coordinate) => -coordinate) as [number, number, number]
         : undefined;
-    console.log("Step 1/4: Converting IFC to GLB with IfcConvert...");
+    console.log("Step 1/5: Converting IFC to GLB with IfcConvert...");
     await convertIfcToGlb(inputPath, glbPath, modelOffset, signal);
 
     if (signal?.aborted) throw new Error("Conversion cancelled.");
 
-    console.log(`Step 2/4: Optimizing GLB (Meshopt ${Math.round(simplification.ratio * 100)}%, node IDs retained)...`);
+    console.log(`Step 2/5: Optimizing GLB (Meshopt ${Math.round(simplification.ratio * 100)}%, node IDs retained)...`);
     const optimization = await optimizeGlbForXkt(glbPath, { simplification });
     if (signal?.aborted) throw new Error("Conversion cancelled.");
     const savedBytes = optimization.inputBytes - optimization.outputBytes;
     console.log(`GLB: ${(optimization.inputBytes / 1024 / 1024).toFixed(2)} MB -> ${(optimization.outputBytes / 1024 / 1024).toFixed(2)} MB (${savedBytes >= 0 ? "saved" : "added"} ${(Math.abs(savedBytes) / 1024 / 1024).toFixed(2)} MB)`);
 
-    console.log("Step 3/4: Extracting IFC metadata...");
+    console.log("Step 3/5: Extracting IFC metadata...");
     const mappedMetadata = mapMetadataToGlbNodes(
         await extractMetadata(WebIFC, inputFile),
         glbPath,
@@ -81,7 +82,7 @@ export async function convertIfc(
         + `(${metadataDeduplication.deduplicatedPropertySets} duplicates removed).`,
     );
 
-    console.log("Step 4/4: Converting GLB to XKT...");
+    console.log("Step 4/5: Converting GLB to XKT...");
     await convert2xkt({
         source: glbPath,
         outputXKT: (xktArrayBuffer: ArrayBuffer) => {
@@ -99,6 +100,16 @@ export async function convertIfc(
         log: (msg: string) => console.log(msg),
     });
     if (signal?.aborted) throw new Error("Conversion cancelled.");
+
+    console.log("Step 5/5: Creating Brotli and gzip Viewer assets...");
+    const [xktCompression, metadataCompression] = await Promise.all([
+        createCompressedAssetVariants(xktPath),
+        createCompressedAssetVariants(metadataPath),
+    ]);
+    console.log(
+        `Transfer assets (Brotli): XKT ${(xktCompression.sourceBytes / 1024 / 1024).toFixed(2)} MB -> ${(xktCompression.brotliBytes / 1024 / 1024).toFixed(2)} MB, `
+        + `metadata ${(metadataCompression.sourceBytes / 1024 / 1024).toFixed(2)} MB -> ${(metadataCompression.brotliBytes / 1024 / 1024).toFixed(2)} MB.`,
+    );
 
     fs.writeFileSync(
         manifestPath,

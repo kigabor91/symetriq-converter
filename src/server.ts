@@ -173,8 +173,63 @@ function removeProjectDirectory(projectId: string): void {
     fs.rmSync(projectDirectory, { recursive: true, force: true });
 }
 
+/** Serves a pre-compressed XKT or metadata response when the browser supports it. */
+function servePrecompressedViewerAsset(
+    request: express.Request,
+    response: express.Response,
+    next: express.NextFunction,
+): void {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+        next();
+        return;
+    }
+
+    const encoding = request.acceptsEncodings("br", "gzip", "identity");
+    if (encoding !== "br" && encoding !== "gzip") {
+        next();
+        return;
+    }
+
+    let relativePath: string;
+    try {
+        relativePath = decodeURIComponent(request.path).replace(/^[/\\]+/, "");
+    } catch {
+        next();
+        return;
+    }
+    if (!relativePath.endsWith(".xkt") && !relativePath.endsWith(".metadata.json")) {
+        next();
+        return;
+    }
+
+    const projectsDirectory = path.resolve(getDataDirectory(), "projects");
+    const assetPath = path.resolve(projectsDirectory, relativePath);
+    if (!assetPath.startsWith(`${projectsDirectory}${path.sep}`)) {
+        next();
+        return;
+    }
+
+    const compressedPath = `${assetPath}.${encoding === "br" ? "br" : "gz"}`;
+    if (!fs.existsSync(compressedPath)) {
+        next();
+        return;
+    }
+
+    response.setHeader("Content-Encoding", encoding);
+    response.setHeader("Vary", "Accept-Encoding");
+    response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+    response.setHeader(
+        "Content-Type",
+        relativePath.endsWith(".metadata.json") ? "application/json; charset=utf-8" : "application/octet-stream",
+    );
+    response.sendFile(compressedPath, (error) => {
+        if (error) next(error);
+    });
+}
+
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "50mb" }));
+app.use("/project-files", servePrecompressedViewerAsset);
 app.use(
     "/project-files",
     express.static(path.join(getDataDirectory(), "projects"), {
@@ -189,6 +244,9 @@ app.use(
         setHeaders(response, filePath) {
             const extension = path.extname(filePath).toLowerCase();
             response.setHeader("X-Content-Type-Options", "nosniff");
+            if ([".xkt", ".json"].includes(extension)) {
+                response.setHeader("Vary", "Accept-Encoding");
+            }
             // LAS/LAZ and JPEG are already compressed binary formats. Leaving
             // them unencoded preserves efficient byte-range delivery. JSON is
             // intentionally cacheable too; IIS can Brotli/Gzip it upstream.
