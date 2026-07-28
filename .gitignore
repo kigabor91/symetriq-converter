@@ -1,7 +1,14 @@
 node_modules/
+dist-server/
+__pycache__/
+*.pyc
 
 input/*
 output/*
+tools/ifcopenshell/
+tools/e57_runtime/
+tools/python/
+data/
 
 !input/README.md
 !output/README.md
