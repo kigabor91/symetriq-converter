@@ -91,9 +91,11 @@ export async function convertIfc(
         configs: {
             sourceConfigs: {
                 glb: {
-                    // Retain practical model edges for the plan-view outline.
-                    // Very dense meshes remain excluded to protect conversion time.
-                    maxIndicesForEdge: 10000,
+                    // The Viewer loads every XKT with `edges: false`, including
+                    // plan view. Do not serialize unused edge-index buffers:
+                    // maxIndicesForEdge=1 excludes every triangle mesh while
+                    // preserving faces, element IDs, picking and metadata.
+                    maxIndicesForEdge: 1,
                 },
             },
         },
