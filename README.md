@@ -39,8 +39,8 @@ reordering is lossless and still improves GPU vertex-cache locality.
 
 Optional tuning:
 
-- `SYMETRIQ_MESH_SIMPLIFICATION_RATIO` - retained-triangle target (default: `0.65`)
-- `SYMETRIQ_MESH_SIMPLIFICATION_ERROR` - maximum relative geometric error (default: `0.001`)
+- `SYMETRIQ_MESH_SIMPLIFICATION_RATIO` - retained-triangle target (default: `0.40`)
+- `SYMETRIQ_MESH_SIMPLIFICATION_ERROR` - maximum relative geometric error (default: `0.002`)
 
 ## IfcConvert
 

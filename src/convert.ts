@@ -23,8 +23,8 @@ export interface ConversionResult {
 }
 
 function getMeshSimplificationProfile(): { ratio: number; error: number } {
-    const ratio = Number(process.env.SYMETRIQ_MESH_SIMPLIFICATION_RATIO ?? "0.65");
-    const error = Number(process.env.SYMETRIQ_MESH_SIMPLIFICATION_ERROR ?? "0.001");
+    const ratio = Number(process.env.SYMETRIQ_MESH_SIMPLIFICATION_RATIO ?? "0.40");
+    const error = Number(process.env.SYMETRIQ_MESH_SIMPLIFICATION_ERROR ?? "0.002");
     if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
         throw new Error("SYMETRIQ_MESH_SIMPLIFICATION_RATIO must be greater than 0 and at most 1.");
     }
