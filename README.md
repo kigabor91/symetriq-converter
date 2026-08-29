@@ -16,6 +16,25 @@ under `data/projects` and is ignored by Git.
 
 Keep this server running while using the Viewer development server.
 
+## Hub Projects API
+
+The Revit Copilot can list Hub projects that are valid publish targets:
+
+```http
+GET /api/hub/projects
+```
+
+Response (`200 OK`):
+
+```json
+[
+  { "id": "project-id", "name": "Office Building" }
+]
+```
+
+`id` is the same identifier required by the existing publish endpoint:
+`POST /api/hub/projects/{projectId}/publish`.
+
 Converts IFC models into the SymetrIQ Viewer package:
 
 `IFC -> GLB (IfcConvert) -> safe GLB optimization -> XKT (xeokit-convert) + metadata JSON`

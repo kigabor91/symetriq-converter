@@ -6,6 +6,7 @@ import * as path from "node:path";
 import multer from "multer";
 import { convertIfc } from "./convert.js";
 import { convertE57 } from "./convertE57.js";
+import { createPublishRouter } from "./publish/publishRoutes.js";
 import {
     getDataDirectory,
     getProjectDirectory,
@@ -229,6 +230,7 @@ function servePrecompressedViewerAsset(
 
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "50mb" }));
+app.use("/api/hub", createPublishRouter());
 app.use("/project-files", servePrecompressedViewerAsset);
 app.use(
     "/project-files",
