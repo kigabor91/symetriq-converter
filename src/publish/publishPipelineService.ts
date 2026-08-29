@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { PublishJob, PublishStatusResponse } from "./publishModels.js";
 import { GeometryOptimizer } from "./geometryOptimizer.js";
 import { PublishModelConverter } from "./publishModelConverter.js";
+import { PublishMetadataNormalizer } from "./publishMetadataNormalizer.js";
 import { PublishProjectUpdater } from "./publishProjectUpdater.js";
 import { PublishStorage } from "./publishStore.js";
 import { PublishWorkspace } from "./publishWorkspace.js";
@@ -39,6 +40,7 @@ export class PublishPipelineService {
         private readonly workspaceFactory: (publishId: string) => PublishWorkspace = (publishId) => new PublishWorkspace(publishId),
         private readonly geometryOptimizer = new GeometryOptimizer(),
         private readonly modelConverter = new PublishModelConverter(),
+        private readonly metadataNormalizer = new PublishMetadataNormalizer(),
         private readonly projectUpdater = new PublishProjectUpdater(),
     ) {}
 
@@ -81,6 +83,7 @@ export class PublishPipelineService {
                 storedJob.pipeline = { state: "converting", updatedAt: new Date().toISOString() };
             });
             const convertedModel = await this.modelConverter.convert(workspace);
+            this.metadataNormalizer.normalizeFile(workspace.metadataPath);
             await this.projectUpdater.addModel(projectId, publishId, model.originalname, convertedModel);
             this.storage.updateJob(publishId, (storedJob) => {
                 storedJob.status = "completed";

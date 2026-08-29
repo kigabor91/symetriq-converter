@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { PublishPipelineService } from "./publishPipelineService.js";
 import { PublishModelConverter } from "./publishModelConverter.js";
+import { PublishMetadataNormalizer } from "./publishMetadataNormalizer.js";
 import { PublishProjectUpdater } from "./publishProjectUpdater.js";
 import { PublishStorage } from "./publishStore.js";
 import { PublishWorkspace } from "./publishWorkspace.js";
@@ -18,7 +19,16 @@ test("publish pipeline publishes converted XKT into the project update layer", a
         const modelPath = path.join(uploadDirectory, "revit-model.glb");
         const metadataPath = path.join(uploadDirectory, "metadata.json");
         fs.writeFileSync(modelPath, Buffer.from("glTF"));
-        fs.writeFileSync(metadataPath, "{}");
+        fs.writeFileSync(metadataPath, JSON.stringify({
+            schemaVersion: "1.0",
+            elements: [{
+                uniqueId: "revit-unique-id",
+                elementId: 42,
+                category: { id: "OST_PipeCurves", name: "Pipes" },
+                family: "Pipe Types",
+                type: "Standard",
+            }],
+        }));
         const storage = new PublishStorage(path.join(testDirectory, "storage"));
         const publishedModels: Array<{ projectId: string; publishId: string; converted: PublishModelConversionResult }> = [];
         const modelConverter = {
@@ -37,6 +47,7 @@ test("publish pipeline publishes converted XKT into the project update layer", a
             (publishId) => new PublishWorkspace(publishId, path.join(testDirectory, "workspaces")),
             undefined,
             modelConverter,
+            undefined,
             projectUpdater,
         );
 
@@ -55,11 +66,37 @@ test("publish pipeline publishes converted XKT into the project update layer", a
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "metadata.json")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "optimized.glb")).equals(Buffer.from("glTF")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "model.xkt")).equals(Buffer.from("xkt")), true);
+        const normalizedMetadata = JSON.parse(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "metadata.json"), "utf8"));
+        assert.equal(normalizedMetadata.version, 2);
+        assert.equal(normalizedMetadata.levels.length, 0);
+        assert.deepEqual(normalizedMetadata.elements["revit-unique-id"].propertySetIds, ["revit:revit-unique-id"]);
+        assert.deepEqual(normalizedMetadata.propertySets["revit:revit-unique-id"].properties.map((property: { name: string; value: unknown }) => [property.name, property.value]), [
+            ["Revit Element ID", 42],
+            ["Revit Unique ID", "revit-unique-id"],
+            ["Category", "Pipes"],
+            ["Family", "Pipe Types"],
+            ["Type", "Standard"],
+        ]);
         assert.equal(publishedModels[0]?.projectId, "project-1");
         assert.equal(publishedModels[0]?.publishId, result.publishId);
     } finally {
         fs.rmSync(testDirectory, { recursive: true, force: true });
     }
+});
+
+test("metadata normalizer preserves existing canonical IFC metadata", () => {
+    const metadata = {
+        version: 2,
+        elements: {
+            "ifc-node": { globalId: "ifc-guid", type: "IfcWall", name: "Wall", propertySetIds: ["pset-1"] },
+        },
+        propertySets: {
+            "pset-1": { id: "pset-1", name: "Pset_WallCommon", type: "IfcPropertySet", properties: [] },
+        },
+        levels: [],
+    };
+
+    assert.equal(new PublishMetadataNormalizer().normalize(metadata), metadata);
 });
 
 test("publish pipeline records a failed conversion for status polling", async () => {
