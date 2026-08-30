@@ -55,4 +55,9 @@ export class PublishWorkspace {
     remove(): void {
         fs.rmSync(this.directory, { recursive: true, force: true });
     }
+
+    /** The source upload is not part of the completed publish package. */
+    removeRawModel(): void {
+        fs.rmSync(this.modelPath, { force: true });
+    }
 }

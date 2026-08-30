@@ -1,29 +1,31 @@
-import * as fs from "node:fs/promises";
-import { PublishWorkspace } from "./publishWorkspace.js";
+import { optimizeGlbForXkt, type GlbOptimizationStats } from "../glbOptimize.js";
 
-export interface GeometryOptimizerResult {
+export interface GeometryOptimizationResult extends GlbOptimizationStats {
     inputPath: string;
     outputPath: string;
-    inputBytes: number;
-    outputBytes: number;
+    optimizationMilliseconds: number;
 }
 
 /**
- * Geometry Optimizer pipeline boundary.
+ * Source-neutral GLB geometry optimization service.
  *
- * Sprint 003 intentionally uses a byte-preserving write. The later geometry
- * optimization implementation belongs here, while the pipeline and the next
- * convert2xkt stage can rely on the stable optimized.glb contract today.
+ * It only applies lossless operations: vertex welding, exact geometry/
+ * accessor/material deduplication and index reordering. It neither flattens
+ * nodes nor bakes transforms or emits meshopt-compressed GLB, preserving the
+ * ordinary GLB contract consumed by convert2xkt.
+ *
+ * The current caller is the Revit Publish pipeline. Other sources can reuse
+ * this service later without coupling it to the existing IFC conversion path.
  */
-export class GeometryOptimizer {
-    async optimize(workspace: PublishWorkspace): Promise<GeometryOptimizerResult> {
-        const glb = await fs.readFile(workspace.modelPath);
-        await fs.writeFile(workspace.optimizedModelPath, glb);
+export class GeometryOptimizerService {
+    async optimize(inputPath: string, outputPath: string): Promise<GeometryOptimizationResult> {
+        const startedAt = performance.now();
+        const stats = await optimizeGlbForXkt(inputPath, undefined, outputPath);
         return {
-            inputPath: workspace.modelPath,
-            outputPath: workspace.optimizedModelPath,
-            inputBytes: glb.byteLength,
-            outputBytes: glb.byteLength,
+            inputPath,
+            outputPath,
+            optimizationMilliseconds: performance.now() - startedAt,
+            ...stats,
         };
     }
 }

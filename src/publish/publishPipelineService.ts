@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { PublishJob, PublishStatusResponse } from "./publishModels.js";
-import { GeometryOptimizer } from "./geometryOptimizer.js";
+import { GeometryOptimizerService } from "./geometryOptimizer.js";
 import { PublishModelConverter } from "./publishModelConverter.js";
 import { PublishMetadataNormalizer } from "./publishMetadataNormalizer.js";
 import { PublishProjectUpdater } from "./publishProjectUpdater.js";
@@ -38,7 +38,7 @@ export class PublishPipelineService {
     constructor(
         private readonly storage = new PublishStorage(),
         private readonly workspaceFactory: (publishId: string) => PublishWorkspace = (publishId) => new PublishWorkspace(publishId),
-        private readonly geometryOptimizer = new GeometryOptimizer(),
+        private readonly geometryOptimizer = new GeometryOptimizerService(),
         private readonly modelConverter = new PublishModelConverter(),
         private readonly metadataNormalizer = new PublishMetadataNormalizer(),
         private readonly projectUpdater = new PublishProjectUpdater(),
@@ -77,7 +77,14 @@ export class PublishPipelineService {
                 storedJob.status = "optimizing";
                 storedJob.pipeline = { state: "optimizing", updatedAt: new Date().toISOString() };
             });
-            await this.geometryOptimizer.optimize(workspace);
+            const optimization = await this.geometryOptimizer.optimize(workspace.modelPath, workspace.optimizedModelPath);
+            console.info(
+                `[Publish optimizer] raw ${(optimization.inputBytes / 1024 / 1024).toFixed(2)} MB, `
+                + `${optimization.inputVertices} vertices, ${optimization.inputTriangles} triangles -> `
+                + `optimized ${(optimization.outputBytes / 1024 / 1024).toFixed(2)} MB, `
+                + `${optimization.outputVertices} vertices, ${optimization.outputTriangles} triangles `
+                + `in ${optimization.optimizationMilliseconds.toFixed(0)} ms`,
+            );
             this.storage.updateJob(publishId, (storedJob) => {
                 storedJob.status = "converting";
                 storedJob.pipeline = { state: "converting", updatedAt: new Date().toISOString() };
@@ -85,9 +92,27 @@ export class PublishPipelineService {
             const convertedModel = await this.modelConverter.convert(workspace);
             this.metadataNormalizer.normalizeFile(workspace.metadataPath);
             await this.projectUpdater.addModel(projectId, publishId, model.originalname, convertedModel);
+            workspace.removeRawModel();
             this.storage.updateJob(publishId, (storedJob) => {
                 storedJob.status = "completed";
                 storedJob.pipeline = { state: "completed", updatedAt: new Date().toISOString() };
+                storedJob.metrics = {
+                    rawGlb: {
+                        bytes: optimization.inputBytes,
+                        vertices: optimization.inputVertices,
+                        triangles: optimization.inputTriangles,
+                    },
+                    optimizedGlb: {
+                        bytes: optimization.outputBytes,
+                        vertices: optimization.outputVertices,
+                        triangles: optimization.outputTriangles,
+                    },
+                    optimizationMilliseconds: optimization.optimizationMilliseconds,
+                    ...(convertedModel.conversionMilliseconds === undefined
+                        ? {}
+                        : { conversionMilliseconds: convertedModel.conversionMilliseconds }),
+                    ...(convertedModel.xktBytes === undefined ? {} : { xktBytes: convertedModel.xktBytes }),
+                };
             });
             // Preserve the Publish API acknowledgement contract. The status
             // endpoint exposes the completed processing state immediately.

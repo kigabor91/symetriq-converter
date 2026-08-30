@@ -12,6 +12,8 @@ export interface GlbOptimizationStats {
     outputMaterials: number;
     inputVertices: number;
     outputVertices: number;
+    inputTriangles: number;
+    outputTriangles: number;
 }
 
 export interface GlbSimplificationOptions {
@@ -39,6 +41,16 @@ function countVertices(document: Awaited<ReturnType<NodeIO["readBinary"]>>): num
         }, 0), 0);
 }
 
+function countTriangles(document: Awaited<ReturnType<NodeIO["readBinary"]>>): number {
+    return document.getRoot().listMeshes().reduce((total, mesh) => total + mesh.listPrimitives()
+        .reduce((meshTotal, primitive) => {
+            if (primitive.getMode() !== 4) return meshTotal; // TRIANGLES
+            const indices = primitive.getIndices();
+            const position = primitive.getAttribute("POSITION");
+            return meshTotal + Math.floor((indices?.getCount() ?? position?.getCount() ?? 0) / 3);
+        }, 0), 0);
+}
+
 /**
  * Applies transformations while preserving all IFC product nodes.
  *
@@ -48,10 +60,11 @@ function countVertices(document: Awaited<ReturnType<NodeIO["readBinary"]>>): num
  * existing mesh; nodes, node names and metadata lookup IDs remain intact.
  */
 export async function optimizeGlbForXkt(
-    glbPath: string,
+    sourcePath: string,
     options?: { simplification?: GlbSimplificationOptions },
+    outputPath = sourcePath,
 ): Promise<GlbOptimizationStats> {
-    const input = fs.readFileSync(glbPath);
+    const input = fs.readFileSync(sourcePath);
     const inputNodeNames = getNodeNames(input);
     const io = new NodeIO();
     const document = await io.readBinary(input);
@@ -60,6 +73,7 @@ export async function optimizeGlbForXkt(
         inputMeshes: document.getRoot().listMeshes().length,
         inputMaterials: document.getRoot().listMaterials().length,
         inputVertices: countVertices(document),
+        inputTriangles: countTriangles(document),
     };
 
     await Promise.all([MeshoptEncoder.ready, MeshoptSimplifier.ready]);
@@ -97,12 +111,13 @@ export async function optimizeGlbForXkt(
         throw new Error("GLB optimization changed IFC node identities; output was not written.");
     }
 
-    fs.writeFileSync(glbPath, output);
+    fs.writeFileSync(outputPath, output);
     return {
         ...inputStats,
         outputBytes: output.byteLength,
         outputMeshes: document.getRoot().listMeshes().length,
         outputMaterials: document.getRoot().listMaterials().length,
         outputVertices: countVertices(document),
+        outputTriangles: countTriangles(document),
     };
 }

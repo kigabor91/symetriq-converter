@@ -29,6 +29,13 @@ export interface PublishJob {
         storedFileName: "metadata.json";
         size: number;
     };
+    metrics?: {
+        rawGlb: { bytes: number; vertices: number; triangles: number };
+        optimizedGlb: { bytes: number; vertices: number; triangles: number };
+        optimizationMilliseconds: number;
+        conversionMilliseconds?: number;
+        xktBytes?: number;
+    };
     error?: string;
 }
 

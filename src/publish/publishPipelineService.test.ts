@@ -4,12 +4,36 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { PublishPipelineService } from "./publishPipelineService.js";
+import { GeometryOptimizerService } from "./geometryOptimizer.js";
 import { PublishModelConverter } from "./publishModelConverter.js";
 import { PublishMetadataNormalizer } from "./publishMetadataNormalizer.js";
 import { PublishProjectUpdater } from "./publishProjectUpdater.js";
 import { PublishStorage } from "./publishStore.js";
 import { PublishWorkspace } from "./publishWorkspace.js";
 import type { PublishModelConversionResult } from "./publishModelConverter.js";
+
+function createTestOptimizer(): GeometryOptimizerService {
+    return {
+        async optimize(inputPath: string, outputPath: string) {
+            fs.copyFileSync(inputPath, outputPath);
+            return {
+                inputPath,
+                outputPath,
+                inputBytes: 4,
+                outputBytes: 4,
+                inputMeshes: 1,
+                outputMeshes: 1,
+                inputMaterials: 1,
+                outputMaterials: 1,
+                inputVertices: 3,
+                outputVertices: 3,
+                inputTriangles: 1,
+                outputTriangles: 1,
+                optimizationMilliseconds: 1,
+            };
+        },
+    } as GeometryOptimizerService;
+}
 
 test("publish pipeline publishes converted XKT into the project update layer", async () => {
     const testDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "symetriq-publish-"));
@@ -45,7 +69,7 @@ test("publish pipeline publishes converted XKT into the project update layer", a
         const pipeline = new PublishPipelineService(
             storage,
             (publishId) => new PublishWorkspace(publishId, path.join(testDirectory, "workspaces")),
-            undefined,
+            createTestOptimizer(),
             modelConverter,
             undefined,
             projectUpdater,
@@ -61,8 +85,13 @@ test("publish pipeline publishes converted XKT into the project update layer", a
         assert.deepEqual(result, { publishId: result.publishId, status: "received" });
         assert.equal(job?.status, "completed");
         assert.equal(job?.pipeline.state, "completed");
+        assert.deepEqual(job?.metrics, {
+            rawGlb: { bytes: 4, vertices: 3, triangles: 1 },
+            optimizedGlb: { bytes: 4, vertices: 3, triangles: 1 },
+            optimizationMilliseconds: 1,
+        });
         assert.equal(job?.workspace.id, result.publishId);
-        assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "model.glb")), true);
+        assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "model.glb")), false);
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "metadata.json")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "optimized.glb")).equals(Buffer.from("glTF")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "model.xkt")).equals(Buffer.from("xkt")), true);
@@ -112,7 +141,7 @@ test("publish pipeline records a failed conversion for status polling", async ()
         const pipeline = new PublishPipelineService(
             storage,
             (publishId) => new PublishWorkspace(publishId, path.join(testDirectory, "workspaces")),
-            undefined,
+            createTestOptimizer(),
             { async convert(): Promise<PublishModelConversionResult> { throw new Error("convert2xkt test failure"); } } as PublishModelConverter,
         );
 
