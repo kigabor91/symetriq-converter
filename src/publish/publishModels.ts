@@ -35,6 +35,17 @@ export interface PublishJob {
         optimizationMilliseconds: number;
         conversionMilliseconds?: number;
         xktBytes?: number;
+        metadata?: {
+            sourceBytes: number;
+            bootstrapBytes: number;
+            parseMilliseconds?: number;
+            parseHeapUsedDeltaBytes?: number;
+            parseRssDeltaBytes?: number;
+            propertyStoreBytes?: number;
+            propertyStoreProcessingMilliseconds?: number;
+            propertyStoreHeapUsedDeltaBytes?: number;
+            propertyStoreRssDeltaBytes?: number;
+        };
     };
     error?: string;
 }

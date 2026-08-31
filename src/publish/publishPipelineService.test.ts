@@ -85,14 +85,15 @@ test("publish pipeline publishes converted XKT into the project update layer", a
         assert.deepEqual(result, { publishId: result.publishId, status: "received" });
         assert.equal(job?.status, "completed");
         assert.equal(job?.pipeline.state, "completed");
-        assert.deepEqual(job?.metrics, {
-            rawGlb: { bytes: 4, vertices: 3, triangles: 1 },
-            optimizedGlb: { bytes: 4, vertices: 3, triangles: 1 },
-            optimizationMilliseconds: 1,
-        });
+        assert.deepEqual(job?.metrics?.rawGlb, { bytes: 4, vertices: 3, triangles: 1 });
+        assert.deepEqual(job?.metrics?.optimizedGlb, { bytes: 4, vertices: 3, triangles: 1 });
+        assert.equal(job?.metrics?.optimizationMilliseconds, 1);
+        assert.equal(job?.metrics?.metadata?.sourceBytes, 172);
+        assert.equal(job?.metrics?.metadata?.propertyStoreBytes, undefined);
         assert.equal(job?.workspace.id, result.publishId);
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "model.glb")), false);
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "metadata.json")), true);
+        assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "canonical-property-store.sqlite")), false);
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "source-metadata.json")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "optimized.glb")).equals(Buffer.from("glTF")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "model.xkt")).equals(Buffer.from("xkt")), true);

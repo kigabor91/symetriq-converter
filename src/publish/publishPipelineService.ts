@@ -9,6 +9,7 @@ import { PublishProjectUpdater } from "./publishProjectUpdater.js";
 import { PublishStorage } from "./publishStore.js";
 import { PublishWorkspace } from "./publishWorkspace.js";
 import { validatePublishPackage } from "./publishPackageContract.js";
+import { isPublishObjectMapV1, type PublishObjectMapV1 } from "./revitSourceMetadata.js";
 
 export class PublishValidationError extends Error {}
 
@@ -19,16 +20,44 @@ function removeFileIfPresent(file: Express.Multer.File | undefined): void {
 function validateUpload(
     model: Express.Multer.File | undefined,
     metadata: Express.Multer.File | undefined,
-): { model: Express.Multer.File; metadata: Express.Multer.File } {
+): {
+    model: Express.Multer.File;
+    metadata: Express.Multer.File;
+    sourceMetadata: unknown;
+    metadataParseMilliseconds: number;
+    metadataParseHeapUsedDeltaBytes: number;
+    metadataParseRssDeltaBytes: number;
+} {
     if (!model || !metadata) throw new PublishValidationError("Both model (GLB) and metadata (JSON) files are required.");
     if (path.extname(model.originalname).toLowerCase() !== ".glb") throw new PublishValidationError("The model file must have a .glb extension.");
     if (path.extname(metadata.originalname).toLowerCase() !== ".json") throw new PublishValidationError("The metadata file must have a .json extension.");
     try {
-        JSON.parse(fs.readFileSync(metadata.path, "utf8"));
+        const before = process.memoryUsage();
+        const startedAt = performance.now();
+        const sourceMetadata = JSON.parse(fs.readFileSync(metadata.path, "utf8")) as unknown;
+        const after = process.memoryUsage();
+        return {
+            model,
+            metadata,
+            sourceMetadata,
+            metadataParseMilliseconds: performance.now() - startedAt,
+            metadataParseHeapUsedDeltaBytes: after.heapUsed - before.heapUsed,
+            metadataParseRssDeltaBytes: after.rss - before.rss,
+        };
     } catch {
         throw new PublishValidationError("The metadata file must contain valid JSON.");
     }
-    return { model, metadata };
+}
+
+function parseObjectMap(upload: Express.Multer.File | undefined): PublishObjectMapV1 | undefined {
+    if (!upload) return undefined;
+    try {
+        const objectMap = JSON.parse(fs.readFileSync(upload.path, "utf8")) as unknown;
+        if (!isPublishObjectMapV1(objectMap)) throw new Error("Unsupported object map.");
+        return objectMap;
+    } catch {
+        throw new PublishValidationError("The object map must contain a valid Revit Publish Package v1 document.");
+    }
 }
 
 /**
@@ -56,8 +85,16 @@ export class PublishPipelineService {
         let publishId: string | undefined;
         let jobStored = false;
         try {
-            const { model, metadata } = validateUpload(uploadedModel, uploadedMetadata);
+            const {
+                model,
+                metadata,
+                sourceMetadata,
+                metadataParseMilliseconds,
+                metadataParseHeapUsedDeltaBytes,
+                metadataParseRssDeltaBytes,
+            } = validateUpload(uploadedModel, uploadedMetadata);
             const publishPackage = validatePublishPackage(model, metadata, { manifest: uploadedManifest, objectMap: uploadedObjectMap }, PublishValidationError);
+            const objectMap = parseObjectMap(uploadedObjectMap);
             publishId = randomUUID();
             const now = new Date().toISOString();
             workspace = this.workspaceFactory(publishId);
@@ -101,7 +138,13 @@ export class PublishPipelineService {
                 storedJob.pipeline = { state: "converting", updatedAt: new Date().toISOString() };
             });
             const convertedModel = await this.modelConverter.convert(workspace);
-            this.metadataNormalizer.normalizeFile(workspace.sourceMetadataPath, workspace.metadataPath);
+            const metadataNormalization = this.metadataNormalizer.project(
+                sourceMetadata,
+                fs.statSync(workspace.sourceMetadataPath).size,
+                workspace.metadataPath,
+                workspace.directory,
+                objectMap,
+            );
             await this.projectUpdater.addModel(projectId, publishId, model.originalname, convertedModel);
             workspace.removeRawModel();
             this.storage.updateJob(publishId, (storedJob) => {
@@ -123,6 +166,19 @@ export class PublishPipelineService {
                         ? {}
                         : { conversionMilliseconds: convertedModel.conversionMilliseconds }),
                     ...(convertedModel.xktBytes === undefined ? {} : { xktBytes: convertedModel.xktBytes }),
+                    metadata: {
+                        sourceBytes: metadataNormalization.sourceBytes,
+                        bootstrapBytes: metadataNormalization.canonicalBytes,
+                        parseMilliseconds: metadataParseMilliseconds,
+                        parseHeapUsedDeltaBytes: metadataParseHeapUsedDeltaBytes,
+                        parseRssDeltaBytes: metadataParseRssDeltaBytes,
+                        ...(metadataNormalization.propertyStore === undefined ? {} : {
+                            propertyStoreBytes: metadataNormalization.propertyStore.databaseBytes,
+                            propertyStoreProcessingMilliseconds: metadataNormalization.propertyStore.processingMilliseconds,
+                            propertyStoreHeapUsedDeltaBytes: metadataNormalization.propertyStore.heapUsedDeltaBytes,
+                            propertyStoreRssDeltaBytes: metadataNormalization.propertyStore.rssDeltaBytes,
+                        }),
+                    },
                 };
             });
             // Preserve the Publish API acknowledgement contract. The status

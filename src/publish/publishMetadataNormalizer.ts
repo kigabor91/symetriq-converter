@@ -5,8 +5,21 @@ import type {
     SymetriqProperty,
     SymetriqPropertySet,
 } from "../metadata.js";
+import {
+    isRevitSourceMetadataV1,
+    type PublishObjectMapV1,
+    type RevitSourceMetadataV1,
+} from "./revitSourceMetadata.js";
+import { CanonicalPropertyStore, type CanonicalPropertyStoreStats } from "./canonicalPropertyStore.js";
 
 type JsonRecord = Record<string, unknown>;
+
+export interface MetadataNormalizationResult {
+    metadata: SymetriqMetadata;
+    sourceBytes: number;
+    canonicalBytes: number;
+    propertyStore?: CanonicalPropertyStoreStats;
+}
 
 function isRecord(value: unknown): value is JsonRecord {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -29,55 +42,6 @@ function isCanonicalMetadata(value: unknown): value is SymetriqMetadata {
         && Array.isArray(value.levels);
 }
 
-interface RevitSourceParameterDefinition {
-    parameterId: string;
-    name: string;
-    storageType?: string;
-    specTypeId?: string | null;
-    unitTypeId?: string | null;
-}
-
-interface RevitSourceParameterValue {
-    parameterId: string;
-    rawValue: unknown;
-    displayValue?: string | null;
-}
-
-interface RevitSourceType {
-    typeId: string;
-    sourceTypeId: string;
-    familyName?: string | null;
-    name?: string | null;
-    parameterValues: RevitSourceParameterValue[];
-}
-
-interface RevitSourceElement {
-    logicalElementId: string;
-    sourceElementId: string;
-    typeId?: string | null;
-    category?: string;
-    family?: string | null;
-    type?: string | null;
-    instanceParameterValues: RevitSourceParameterValue[];
-}
-
-interface RevitSourceMetadataV1 {
-    version: "1.0";
-    sourceKind: "revit";
-    parameterDefinitions: RevitSourceParameterDefinition[];
-    types: RevitSourceType[];
-    elements: RevitSourceElement[];
-}
-
-function isRevitSourceMetadataV1(value: unknown): value is RevitSourceMetadataV1 {
-    return isRecord(value)
-        && value.version === "1.0"
-        && value.sourceKind === "revit"
-        && Array.isArray(value.parameterDefinitions)
-        && Array.isArray(value.types)
-        && Array.isArray(value.elements);
-}
-
 function revitProperties(element: JsonRecord, uniqueId: string): SymetriqProperty[] {
     return [
         { name: "Revit Element ID", value: element.elementId ?? "", type: "string" },
@@ -97,13 +61,25 @@ function revitProperties(element: JsonRecord, uniqueId: string): SymetriqPropert
  * of duplicated Viewer property sets and can exceed V8's single-string limit.
  * Canonical semantic property-set mapping is a separate, Hub-owned milestone.
  */
-function normalizeRevitSourceMetadata(metadata: RevitSourceMetadataV1): SymetriqMetadata {
+function normalizeRevitSourceMetadata(
+    metadata: RevitSourceMetadataV1,
+    objectMap?: PublishObjectMapV1,
+): SymetriqMetadata {
     const types = new Map(metadata.types.map((type) => [type.typeId, type]));
+    const sourcesByLogicalId = new Map(metadata.elements.map((element) => [element.logicalElementId, element]));
     const elements: Record<string, SymetriqElement> = {};
     const propertySets: Record<string, SymetriqPropertySet> = {};
 
-    for (const sourceElement of metadata.elements) {
-        const sourceElementId = text(sourceElement.sourceElementId);
+    const projectionEntries = objectMap?.renderObjects.map((renderObject) => ({
+        sourceElement: sourcesByLogicalId.get(renderObject.logicalElementId),
+        // XKT currently preserves GLB node names, not the Package v1 render ID.
+        viewerObjectId: text(renderObject.geometry?.legacyNodeName, text(renderObject.sourceElementId)),
+    })) ?? metadata.elements.map((sourceElement) => ({ sourceElement, viewerObjectId: text(sourceElement.sourceElementId) }));
+
+    for (const entry of projectionEntries) {
+        const sourceElement = entry.sourceElement;
+        if (!sourceElement) continue;
+        const sourceElementId = text(entry.viewerObjectId);
         if (!sourceElementId) continue;
         const type = sourceElement.typeId ? types.get(sourceElement.typeId) : undefined;
         const category = text(sourceElement.category, "Uncategorized");
@@ -143,13 +119,15 @@ function normalizeRevitSourceMetadata(metadata: RevitSourceMetadataV1): Symetriq
  * canonical `elements` key.
  */
 export class PublishMetadataNormalizer {
-    normalize(metadata: unknown): SymetriqMetadata {
+    constructor(private readonly propertyStore = new CanonicalPropertyStore()) {}
+
+    normalize(metadata: unknown, objectMap?: PublishObjectMapV1): SymetriqMetadata {
         if (isCanonicalMetadata(metadata)) {
             return metadata;
         }
 
         if (isRevitSourceMetadataV1(metadata)) {
-            return normalizeRevitSourceMetadata(metadata);
+            return normalizeRevitSourceMetadata(metadata, objectMap);
         }
 
         const incomingElements = isRecord(metadata) && Array.isArray(metadata.elements)
@@ -188,13 +166,36 @@ export class PublishMetadataNormalizer {
         return { version: 2, elements, propertySets, levels: [] };
     }
 
-    normalizeFile(sourceMetadataPath: string, canonicalMetadataPath = sourceMetadataPath): SymetriqMetadata {
+    normalizeFile(
+        sourceMetadataPath: string,
+        canonicalMetadataPath = sourceMetadataPath,
+        propertyStoreDirectory?: string,
+    ): MetadataNormalizationResult {
         const sourceBytes = fs.statSync(sourceMetadataPath).size;
         const metadata = JSON.parse(fs.readFileSync(sourceMetadataPath, "utf8")) as unknown;
-        const normalized = this.normalize(metadata);
+        return this.project(metadata, sourceBytes, canonicalMetadataPath, propertyStoreDirectory);
+    }
+
+    /** Projects an already parsed source record, avoiding a second large JSON parse. */
+    project(
+        metadata: unknown,
+        sourceBytes: number,
+        canonicalMetadataPath: string,
+        propertyStoreDirectory?: string,
+        objectMap?: PublishObjectMapV1,
+    ): MetadataNormalizationResult {
+        const normalized = this.normalize(metadata, objectMap);
         const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
         fs.writeFileSync(canonicalMetadataPath, serialized, "utf8");
-        console.info(`[Publish metadata] source ${(sourceBytes / 1024 / 1024).toFixed(2)} MB -> canonical ${(Buffer.byteLength(serialized) / 1024 / 1024).toFixed(2)} MB`);
-        return normalized;
+        const canonicalBytes = Buffer.byteLength(serialized);
+        const propertyStore = propertyStoreDirectory && isRevitSourceMetadataV1(metadata)
+            ? this.propertyStore.build(metadata, propertyStoreDirectory, sourceBytes, canonicalBytes, objectMap)
+            : undefined;
+        console.info(
+            `[Publish metadata] source ${(sourceBytes / 1024 / 1024).toFixed(2)} MB -> `
+            + `bootstrap ${(canonicalBytes / 1024 / 1024).toFixed(2)} MB`
+            + (propertyStore ? `; property store ${(propertyStore.databaseBytes / 1024 / 1024).toFixed(2)} MB` : ""),
+        );
+        return { metadata: normalized, sourceBytes, canonicalBytes, ...(propertyStore ? { propertyStore } : {}) };
     }
 }

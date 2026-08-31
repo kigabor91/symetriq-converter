@@ -53,6 +53,11 @@ export class PublishWorkspace {
         return path.join(this.directory, "object-map.json");
     }
 
+    /** Hub-owned normalized metadata database; never served to the Viewer at bootstrap. */
+    get propertyStorePath(): string {
+        return path.join(this.directory, "canonical-property-store.sqlite");
+    }
+
     createFromUpload(model: Express.Multer.File, metadata: Express.Multer.File, manifest?: Express.Multer.File, objectMap?: Express.Multer.File): PublishWorkspaceFiles {
         fs.mkdirSync(this.workspacesDirectory, { recursive: true });
         fs.mkdirSync(this.directory, { recursive: false });
