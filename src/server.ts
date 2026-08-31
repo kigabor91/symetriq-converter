@@ -7,6 +7,7 @@ import multer from "multer";
 import { convertIfc } from "./convert.js";
 import { convertE57 } from "./convertE57.js";
 import { createPublishRouter } from "./publish/publishRoutes.js";
+import { CanonicalPropertyStore } from "./publish/canonicalPropertyStore.js";
 import {
     getDataDirectory,
     getProjectDirectory,
@@ -294,6 +295,65 @@ app.get("/api/projects/:projectId", (request, response) => {
         return;
     }
     response.json(project);
+});
+
+/**
+ * Returns one published Revit element's full canonical property set on demand.
+ * `renderObjectId` comes from the Hub-owned object-map reference in bootstrap
+ * metadata; it is never inferred by looking up an XKT node name.
+ */
+app.get("/api/projects/:projectId/models/:modelId/render-objects/:renderObjectId/properties", (request, response) => {
+    const projectId = String(request.params.projectId ?? "");
+    const modelId = String(request.params.modelId ?? "");
+    const renderObjectId = String(request.params.renderObjectId ?? "");
+    const project = readProjects().find((candidate) => candidate.id === projectId);
+    if (!project) {
+        response.status(404).json({ error: "Project not found." });
+        return;
+    }
+    if (!project.files.some((file) => file.id === modelId && file.model)) {
+        response.status(404).json({ error: "Published model not found in this project." });
+        return;
+    }
+    const databasePath = path.join(getDataDirectory(), "publish-workspaces", modelId, CanonicalPropertyStore.databaseFilename);
+    if (!fs.existsSync(databasePath)) {
+        response.status(404).json({ error: "Full properties are not available for this model." });
+        return;
+    }
+    const record = new CanonicalPropertyStore().getElementPropertiesForRenderObject(databasePath, renderObjectId);
+    if (!record) {
+        response.status(404).json({ error: "Render object not found in this model's property store." });
+        return;
+    }
+    const propertySet = (scope: "instance" | "type", name: string) => ({
+        id: `canonical:${renderObjectId}:${scope}`,
+        name,
+        type: "Revit",
+        properties: record.properties.filter((property) => property.scope === scope).map((property) => ({
+            name: property.name,
+            value: property.displayValue ?? property.rawValue,
+            type: property.storageType ?? "string",
+            parameterId: property.parameterId,
+            rawValue: property.rawValue,
+            displayValue: property.displayValue,
+            specTypeId: property.specTypeId,
+            unitTypeId: property.unitTypeId,
+        })),
+    });
+    const propertySets = [
+        propertySet("instance", "Revit Instance Parameters"),
+        propertySet("type", "Revit Type Parameters"),
+    ].filter((set) => set.properties.length > 0);
+    response.json({
+        renderObjectId,
+        logicalElementId: record.logicalElementId,
+        sourceElementId: record.sourceElementId,
+        typeId: record.typeId,
+        category: record.category,
+        family: record.family,
+        type: record.type,
+        propertySets,
+    });
 });
 
 app.put("/api/projects/:projectId", (request, response) => {

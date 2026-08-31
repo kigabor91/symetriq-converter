@@ -74,7 +74,12 @@ function normalizeRevitSourceMetadata(
         sourceElement: sourcesByLogicalId.get(renderObject.logicalElementId),
         // XKT currently preserves GLB node names, not the Package v1 render ID.
         viewerObjectId: text(renderObject.geometry?.legacyNodeName, text(renderObject.sourceElementId)),
-    })) ?? metadata.elements.map((sourceElement) => ({ sourceElement, viewerObjectId: text(sourceElement.sourceElementId) }));
+        renderObjectId: renderObject.renderObjectId,
+    })) ?? metadata.elements.map((sourceElement) => ({
+        sourceElement,
+        viewerObjectId: text(sourceElement.sourceElementId),
+        renderObjectId: `legacy:${sourceElement.sourceElementId}`,
+    }));
 
     for (const entry of projectionEntries) {
         const sourceElement = entry.sourceElement;
@@ -85,26 +90,19 @@ function normalizeRevitSourceMetadata(
         const category = text(sourceElement.category, "Uncategorized");
         const family = text(sourceElement.family, type?.familyName ? text(type.familyName) : "");
         const typeName = text(sourceElement.type, type?.name ? text(type.name) : "");
-        const identityPropertySetId = `revit:${sourceElementId}:identity`;
-        const propertySetIds = [identityPropertySetId];
-
         elements[sourceElementId] = {
             globalId: sourceElementId,
             type: category,
             name: family && typeName ? `${family} - ${typeName}` : family || typeName || category,
-            propertySetIds,
-        };
-        propertySets[identityPropertySetId] = {
-            id: identityPropertySetId,
-            name: "Revit Identity",
-            type: "Revit",
-            properties: [
-                { name: "Logical Element ID", value: sourceElement.logicalElementId, type: "string" },
-                { name: "Revit Unique ID", value: sourceElementId, type: "string" },
-                { name: "Category", value: category, type: "string" },
-                { name: "Family", value: family, type: "string" },
-                { name: "Type", value: typeName, type: "string" },
-            ],
+            propertySetIds: [],
+            identity: {
+                logicalElementId: sourceElement.logicalElementId,
+                revitUniqueId: sourceElement.sourceElementId,
+                category,
+                family,
+                type: typeName,
+            },
+            propertyStore: { renderObjectId: entry.renderObjectId },
         };
     }
 

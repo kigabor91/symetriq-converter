@@ -41,6 +41,9 @@ test("canonical property store deduplicates Revit definitions, values and proper
         assert.equal(stats.propertySets, 2);
         assert.equal(stats.types, 1);
         assert.equal(stats.elements, 2);
+        assert.equal(stats.analysis.instancePropertyCount, 2);
+        assert.equal(stats.analysis.typePropertyCount, 1);
+        assert.equal(stats.analysis.topFrequentProperties[0]?.name, "Asset Code");
         assert.ok(stats.databaseBytes > 0);
         assert.deepEqual(store.getFacetValues(databasePath, "category"), ["Pipes"]);
         assert.deepEqual(store.getElementProperties(databasePath, "revit-one"), {
@@ -104,12 +107,12 @@ test("Revit source projection keeps the Viewer bootstrap small while retaining f
         const result = new PublishMetadataNormalizer().project(source, sourceBytes, bootstrapPath, directory);
         const store = new CanonicalPropertyStore();
 
-        assert.ok(result.canonicalBytes < sourceBytes / 5);
+        assert.ok(result.canonicalBytes < sourceBytes / 20);
         assert.equal(result.propertyStore?.definitions, 100);
         assert.equal(result.propertyStore?.propertyValues, 200);
         assert.equal(result.propertyStore?.propertySets, 2);
         assert.equal(result.propertyStore?.elements, 10);
-        assert.equal(result.metadata.elements["revit-0"]?.propertySetIds.length, 1);
+        assert.equal(result.metadata.elements["revit-0"]?.propertySetIds.length, 0);
         assert.equal(
             store.getElementProperties(path.join(directory, CanonicalPropertyStore.databaseFilename), "revit-0")?.properties.length,
             200,
@@ -148,7 +151,8 @@ test("explicit object map links the current Viewer object identity to the logica
         assert.ok(result.metadata.elements["current-xkt-object-id"]);
         assert.equal(result.metadata.elements["revit-unique-1"], undefined);
         assert.equal(result.propertyStore?.renderObjects, 1);
-        assert.equal(store.getElementPropertiesForViewerObject(databasePath, "current-xkt-object-id")?.logicalElementId, "logical-1");
+        assert.equal(result.metadata.elements["current-xkt-object-id"]?.propertyStore?.renderObjectId, "ro-1");
+        assert.equal(store.getElementPropertiesForRenderObject(databasePath, "ro-1")?.logicalElementId, "logical-1");
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
     }

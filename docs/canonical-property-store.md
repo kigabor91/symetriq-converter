@@ -177,3 +177,37 @@ The automated large-shape test verifies that a full parameter graph is
 retained in the Store while the bootstrap is less than one fifth of the source
 JSON. The next real 455 MB Copilot publish records the production benchmark in
 its workspace and publish job; no estimate is substituted for that measurement.
+
+## 003B: on-demand property retrieval and Store analysis
+
+The Viewer bootstrap is intentionally not a property cache. For a Revit
+publish it contains one `elements[viewerObjectId]` entry with only scene
+identity (`category`, `family`, `type`, logical element ID) and the Hub-owned
+`propertyStore.renderObjectId`. It contains no per-element property-set copy.
+
+When the user selects **Show all properties**, the Viewer calls:
+
+```text
+GET /api/projects/{projectId}/models/{modelId}/render-objects/{renderObjectId}/properties
+```
+
+The backend resolves `renderObjectId -> logicalElementId -> property store`.
+The `renderObjectId` is the explicit Package v1 object-map identifier. The
+Viewer does not use `node.name` as a property lookup key. The temporary XKT
+viewer object ID is used only to find its bootstrap entry, which already holds
+the authoritative `renderObjectId`.
+
+The endpoint returns separate canonical **Revit Instance Parameters** and
+**Revit Type Parameters** sets, including display value, raw value, parameter
+ID and source unit/spec information. It returns `404` for IFC or older
+published models that do not have a Property Store; their existing metadata
+route remains unchanged.
+
+Every new Store now also writes
+`canonical-property-store.analysis.json`. It records property-definition and
+unique-name counts, unique values, instance/type counts, the top 20 most
+frequent and largest source properties, plus SQLite page, data and index byte
+usage. The Store implementation uses integer relationship keys, a
+display-string dictionary, compact binary set hashes and removes the previous
+redundant definition/value index. These changes affect only the internal
+SQLite layout, not the retrieval response contract.

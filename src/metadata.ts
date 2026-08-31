@@ -21,6 +21,14 @@ export interface SymetriqElement {
     name: string;
     parentId?: string;
     propertySetIds: string[];
+    identity?: {
+        logicalElementId: string;
+        revitUniqueId: string;
+        category: string;
+        family: string;
+        type: string;
+    };
+    propertyStore?: { renderObjectId: string };
 }
 
 /** Source-neutral spatial level, expressed in the model's local vertical axis (metres). */

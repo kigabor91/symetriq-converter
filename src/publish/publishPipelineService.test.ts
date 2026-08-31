@@ -141,10 +141,10 @@ test("normalized Revit source metadata retains full parameters while the Viewer 
     const normalized = new PublishMetadataNormalizer().normalize(sourceMetadata);
 
     assert.equal(normalized.version, 2);
-    assert.deepEqual(normalized.elements["revit-unique-1"]!.propertySetIds, ["revit:revit-unique-1:identity"]);
-    assert.deepEqual(normalized.elements["revit-unique-2"]!.propertySetIds, ["revit:revit-unique-2:identity"]);
-    assert.equal(Object.keys(normalized.propertySets).length, 2);
-    assert.equal(normalized.propertySets["revit:revit-unique-1:identity"]!.properties[1]?.value, "revit-unique-1");
+    assert.deepEqual(normalized.elements["revit-unique-1"]!.propertySetIds, []);
+    assert.equal(normalized.elements["revit-unique-1"]!.identity?.revitUniqueId, "revit-unique-1");
+    assert.equal(normalized.elements["revit-unique-1"]!.propertyStore?.renderObjectId, "legacy:revit-unique-1");
+    assert.equal(Object.keys(normalized.propertySets).length, 0);
 });
 
 test("metadata normalizer preserves existing canonical IFC metadata", () => {
