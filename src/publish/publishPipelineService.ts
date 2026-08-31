@@ -8,6 +8,7 @@ import { PublishMetadataNormalizer } from "./publishMetadataNormalizer.js";
 import { PublishProjectUpdater } from "./publishProjectUpdater.js";
 import { PublishStorage } from "./publishStore.js";
 import { PublishWorkspace } from "./publishWorkspace.js";
+import { validatePublishPackage } from "./publishPackageContract.js";
 
 export class PublishValidationError extends Error {}
 
@@ -44,16 +45,23 @@ export class PublishPipelineService {
         private readonly projectUpdater = new PublishProjectUpdater(),
     ) {}
 
-    async start(projectId: string, uploadedModel: Express.Multer.File | undefined, uploadedMetadata: Express.Multer.File | undefined): Promise<PublishStatusResponse> {
+    async start(
+        projectId: string,
+        uploadedModel: Express.Multer.File | undefined,
+        uploadedMetadata: Express.Multer.File | undefined,
+        uploadedManifest?: Express.Multer.File,
+        uploadedObjectMap?: Express.Multer.File,
+    ): Promise<PublishStatusResponse> {
         let workspace: PublishWorkspace | undefined;
         let publishId: string | undefined;
         let jobStored = false;
         try {
             const { model, metadata } = validateUpload(uploadedModel, uploadedMetadata);
+            const publishPackage = validatePublishPackage(model, metadata, { manifest: uploadedManifest, objectMap: uploadedObjectMap }, PublishValidationError);
             publishId = randomUUID();
             const now = new Date().toISOString();
             workspace = this.workspaceFactory(publishId);
-            workspace.createFromUpload(model, metadata);
+            workspace.createFromUpload(model, metadata, uploadedManifest, uploadedObjectMap);
 
             const job: PublishJob = {
                 id: publishId,
@@ -65,6 +73,9 @@ export class PublishPipelineService {
                 model: { originalName: model.originalname, storedFileName: "model.glb", size: model.size },
                 metadata: { originalName: metadata.originalname, storedFileName: "metadata.json", size: metadata.size },
             };
+            if (publishPackage) {
+                console.info(`[Publish package] v${publishPackage.packageVersion} ${publishPackage.packageId}; source=${publishPackage.sourceKind}; logical=${publishPackage.logicalElementCount}; render=${publishPackage.renderObjectCount}`);
+            }
             this.storage.createJob(job);
             jobStored = true;
 
@@ -120,6 +131,8 @@ export class PublishPipelineService {
         } catch (error) {
             removeFileIfPresent(uploadedModel);
             removeFileIfPresent(uploadedMetadata);
+            removeFileIfPresent(uploadedManifest);
+            removeFileIfPresent(uploadedObjectMap);
             if (jobStored && publishId) {
                 const message = error instanceof Error ? error.message : String(error);
                 this.storage.updateJob(publishId, (storedJob) => {

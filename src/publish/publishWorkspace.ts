@@ -8,6 +8,8 @@ export interface PublishWorkspaceFiles {
     modelPath: string;
     metadataPath: string;
     optimizedModelPath: string;
+    manifestPath?: string;
+    objectMapPath?: string;
 }
 
 /**
@@ -37,7 +39,15 @@ export class PublishWorkspace {
         return path.join(this.directory, "metadata.json");
     }
 
-    createFromUpload(model: Express.Multer.File, metadata: Express.Multer.File): PublishWorkspaceFiles {
+    get manifestPath(): string {
+        return path.join(this.directory, "manifest.json");
+    }
+
+    get objectMapPath(): string {
+        return path.join(this.directory, "object-map.json");
+    }
+
+    createFromUpload(model: Express.Multer.File, metadata: Express.Multer.File, manifest?: Express.Multer.File, objectMap?: Express.Multer.File): PublishWorkspaceFiles {
         fs.mkdirSync(this.workspacesDirectory, { recursive: true });
         fs.mkdirSync(this.directory, { recursive: false });
         const modelPath = this.modelPath;
@@ -45,7 +55,15 @@ export class PublishWorkspace {
         try {
             fs.renameSync(model.path, modelPath);
             fs.renameSync(metadata.path, metadataPath);
-            return { modelPath, metadataPath, optimizedModelPath: this.optimizedModelPath };
+            if (manifest) fs.renameSync(manifest.path, this.manifestPath);
+            if (objectMap) fs.renameSync(objectMap.path, this.objectMapPath);
+            return {
+                modelPath,
+                metadataPath,
+                optimizedModelPath: this.optimizedModelPath,
+                ...(manifest ? { manifestPath: this.manifestPath } : {}),
+                ...(objectMap ? { objectMapPath: this.objectMapPath } : {}),
+            };
         } catch (error) {
             fs.rmSync(this.directory, { recursive: true, force: true });
             throw error;

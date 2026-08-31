@@ -10,7 +10,7 @@ fs.mkdirSync(publishUploadDirectory, { recursive: true });
 
 const publishUpload = multer({
     dest: publishUploadDirectory,
-    limits: { files: 2, fileSize: 20 * 1024 * 1024 * 1024 },
+    limits: { files: 4, fileSize: 20 * 1024 * 1024 * 1024 },
 });
 
 /** Stable Copilot-facing representation of a project that accepts publishes. */
@@ -25,14 +25,16 @@ export function toPublishableProjects(
     return projects.map(({ id, name }) => ({ id, name }));
 }
 
-function uploadedFile(request: express.Request, fieldName: "model" | "metadata"): Express.Multer.File | undefined {
+type PublishUploadField = "model" | "metadata" | "manifest" | "objectMap";
+
+function uploadedFile(request: express.Request, fieldName: PublishUploadField): Express.Multer.File | undefined {
     const files = request.files;
     if (!files || Array.isArray(files)) return undefined;
     return files[fieldName]?.[0];
 }
 
 function removeTemporaryFiles(request: express.Request): void {
-    ([uploadedFile(request, "model"), uploadedFile(request, "metadata")]).forEach((file) => {
+    (["model", "metadata", "manifest", "objectMap"] as const).map((field) => uploadedFile(request, field)).forEach((file) => {
         if (file) fs.rmSync(file.path, { force: true });
     });
 }
@@ -46,7 +48,12 @@ export function createPublishRouter(pipeline = new PublishPipelineService()): ex
 
     router.post(
         "/projects/:projectId/publish",
-        publishUpload.fields([{ name: "model", maxCount: 1 }, { name: "metadata", maxCount: 1 }]),
+        publishUpload.fields([
+            { name: "model", maxCount: 1 },
+            { name: "metadata", maxCount: 1 },
+            { name: "manifest", maxCount: 1 },
+            { name: "objectMap", maxCount: 1 },
+        ]),
         async (request, response, next) => {
             const projectId = String(request.params.projectId ?? "");
             if (!readProjects().some((project) => project.id === projectId)) {
@@ -55,7 +62,13 @@ export function createPublishRouter(pipeline = new PublishPipelineService()): ex
                 return;
             }
             try {
-                response.status(201).json(await pipeline.start(projectId, uploadedFile(request, "model"), uploadedFile(request, "metadata")));
+                response.status(201).json(await pipeline.start(
+                    projectId,
+                    uploadedFile(request, "model"),
+                    uploadedFile(request, "metadata"),
+                    uploadedFile(request, "manifest"),
+                    uploadedFile(request, "objectMap"),
+                ));
             } catch (error) {
                 if (error instanceof PublishValidationError) {
                     response.status(400).json({ error: error.message });
