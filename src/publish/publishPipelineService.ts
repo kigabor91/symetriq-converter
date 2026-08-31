@@ -71,7 +71,7 @@ export class PublishPipelineService {
                 pipeline: { state: "created", updatedAt: now },
                 workspace: { id: workspace.id },
                 model: { originalName: model.originalname, storedFileName: "model.glb", size: model.size },
-                metadata: { originalName: metadata.originalname, storedFileName: "metadata.json", size: metadata.size },
+                metadata: { originalName: metadata.originalname, storedFileName: "source-metadata.json", size: metadata.size },
             };
             if (publishPackage) {
                 console.info(`[Publish package] v${publishPackage.packageVersion} ${publishPackage.packageId}; source=${publishPackage.sourceKind}; logical=${publishPackage.logicalElementCount}; render=${publishPackage.renderObjectCount}`);
@@ -101,7 +101,7 @@ export class PublishPipelineService {
                 storedJob.pipeline = { state: "converting", updatedAt: new Date().toISOString() };
             });
             const convertedModel = await this.modelConverter.convert(workspace);
-            this.metadataNormalizer.normalizeFile(workspace.metadataPath);
+            this.metadataNormalizer.normalizeFile(workspace.sourceMetadataPath, workspace.metadataPath);
             await this.projectUpdater.addModel(projectId, publishId, model.originalname, convertedModel);
             workspace.removeRawModel();
             this.storage.updateJob(publishId, (storedJob) => {

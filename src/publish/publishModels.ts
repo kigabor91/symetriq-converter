@@ -26,7 +26,7 @@ export interface PublishJob {
     };
     metadata: {
         originalName: string;
-        storedFileName: "metadata.json";
+        storedFileName: "source-metadata.json";
         size: number;
     };
     metrics?: {

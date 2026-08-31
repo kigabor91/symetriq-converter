@@ -93,6 +93,7 @@ test("publish pipeline publishes converted XKT into the project update layer", a
         assert.equal(job?.workspace.id, result.publishId);
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "model.glb")), false);
         assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "metadata.json")), true);
+        assert.equal(fs.existsSync(path.join(testDirectory, "workspaces", result.publishId, "source-metadata.json")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "optimized.glb")).equals(Buffer.from("glTF")), true);
         assert.equal(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "model.xkt")).equals(Buffer.from("xkt")), true);
         const normalizedMetadata = JSON.parse(fs.readFileSync(path.join(testDirectory, "workspaces", result.publishId, "metadata.json"), "utf8"));
@@ -111,6 +112,46 @@ test("publish pipeline publishes converted XKT into the project update layer", a
     } finally {
         fs.rmSync(testDirectory, { recursive: true, force: true });
     }
+});
+
+test("normalized Revit source metadata retains full parameters while the Viewer receives canonical metadata", () => {
+    const sourceMetadata = {
+        version: "1.0",
+        sourceKind: "revit",
+        parameterDefinitions: [
+            { parameterId: "builtin:42", name: "Diameter", storageType: "Double", specTypeId: "autodesk.spec.aec:length-2.0.0", unitTypeId: "autodesk.unit.unit:millimeters-1.0.0" },
+            { parameterId: "shared:guid-1", name: "Asset Code", storageType: "String" },
+        ],
+        types: [{
+            typeId: "revit-type:type-1", sourceTypeId: "type-1", familyName: "Pipe Types", name: "DN100",
+            parameterValues: [{ parameterId: "builtin:42", rawValue: 0.328084, displayValue: "100 mm" }],
+        }],
+        elements: [{
+            logicalElementId: "le-1", sourceElementId: "revit-unique-1", typeId: "revit-type:type-1",
+            category: "Pipes", family: "Pipe Types", type: "DN100",
+            instanceParameterValues: [{ parameterId: "shared:guid-1", rawValue: "P-01", displayValue: "P-01" }],
+        }, {
+            logicalElementId: "le-2", sourceElementId: "revit-unique-2", typeId: "revit-type:type-1",
+            category: "Pipes", family: "Pipe Types", type: "DN100",
+            instanceParameterValues: [],
+        }],
+    };
+
+    const normalized = new PublishMetadataNormalizer().normalize(sourceMetadata);
+
+    assert.equal(normalized.version, 2);
+    assert.deepEqual(normalized.elements["revit-unique-1"]!.propertySetIds, [
+        "revit:revit-unique-1:identity",
+        "revit:revit-unique-1:instance",
+        "revit:type:revit-type:type-1",
+    ]);
+    assert.deepEqual(normalized.elements["revit-unique-2"]!.propertySetIds, [
+        "revit:revit-unique-2:identity",
+        "revit:type:revit-type:type-1",
+    ]);
+    assert.equal(normalized.propertySets["revit:type:revit-type:type-1"]!.properties[0]?.value, "100 mm");
+    assert.equal(normalized.propertySets["revit:revit-unique-1:instance"]!.properties[0]?.value, "P-01");
+    assert.equal(Object.keys(normalized.propertySets).filter((id) => id.startsWith("revit:type:")).length, 1);
 });
 
 test("metadata normalizer preserves existing canonical IFC metadata", () => {

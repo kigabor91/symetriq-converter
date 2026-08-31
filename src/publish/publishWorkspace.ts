@@ -6,6 +6,7 @@ const defaultWorkspacesDirectory = path.join(getDataDirectory(), "publish-worksp
 
 export interface PublishWorkspaceFiles {
     modelPath: string;
+    sourceMetadataPath: string;
     metadataPath: string;
     optimizedModelPath: string;
     manifestPath?: string;
@@ -39,6 +40,11 @@ export class PublishWorkspace {
         return path.join(this.directory, "metadata.json");
     }
 
+    /** Immutable producer input. The Viewer-facing canonical metadata is written separately. */
+    get sourceMetadataPath(): string {
+        return path.join(this.directory, "source-metadata.json");
+    }
+
     get manifestPath(): string {
         return path.join(this.directory, "manifest.json");
     }
@@ -51,15 +57,16 @@ export class PublishWorkspace {
         fs.mkdirSync(this.workspacesDirectory, { recursive: true });
         fs.mkdirSync(this.directory, { recursive: false });
         const modelPath = this.modelPath;
-        const metadataPath = this.metadataPath;
+        const sourceMetadataPath = this.sourceMetadataPath;
         try {
             fs.renameSync(model.path, modelPath);
-            fs.renameSync(metadata.path, metadataPath);
+            fs.renameSync(metadata.path, sourceMetadataPath);
             if (manifest) fs.renameSync(manifest.path, this.manifestPath);
             if (objectMap) fs.renameSync(objectMap.path, this.objectMapPath);
             return {
                 modelPath,
-                metadataPath,
+                sourceMetadataPath,
+                metadataPath: this.metadataPath,
                 optimizedModelPath: this.optimizedModelPath,
                 ...(manifest ? { manifestPath: this.manifestPath } : {}),
                 ...(objectMap ? { objectMapPath: this.objectMapPath } : {}),
