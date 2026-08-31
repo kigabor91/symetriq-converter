@@ -114,7 +114,7 @@ test("publish pipeline publishes converted XKT into the project update layer", a
     }
 });
 
-test("normalized Revit source metadata retains full parameters while the Viewer receives canonical metadata", () => {
+test("normalized Revit source metadata retains full parameters while the Viewer receives compact canonical identity metadata", () => {
     const sourceMetadata = {
         version: "1.0",
         sourceKind: "revit",
@@ -140,18 +140,10 @@ test("normalized Revit source metadata retains full parameters while the Viewer 
     const normalized = new PublishMetadataNormalizer().normalize(sourceMetadata);
 
     assert.equal(normalized.version, 2);
-    assert.deepEqual(normalized.elements["revit-unique-1"]!.propertySetIds, [
-        "revit:revit-unique-1:identity",
-        "revit:revit-unique-1:instance",
-        "revit:type:revit-type:type-1",
-    ]);
-    assert.deepEqual(normalized.elements["revit-unique-2"]!.propertySetIds, [
-        "revit:revit-unique-2:identity",
-        "revit:type:revit-type:type-1",
-    ]);
-    assert.equal(normalized.propertySets["revit:type:revit-type:type-1"]!.properties[0]?.value, "100 mm");
-    assert.equal(normalized.propertySets["revit:revit-unique-1:instance"]!.properties[0]?.value, "P-01");
-    assert.equal(Object.keys(normalized.propertySets).filter((id) => id.startsWith("revit:type:")).length, 1);
+    assert.deepEqual(normalized.elements["revit-unique-1"]!.propertySetIds, ["revit:revit-unique-1:identity"]);
+    assert.deepEqual(normalized.elements["revit-unique-2"]!.propertySetIds, ["revit:revit-unique-2:identity"]);
+    assert.equal(Object.keys(normalized.propertySets).length, 2);
+    assert.equal(normalized.propertySets["revit:revit-unique-1:identity"]!.properties[1]?.value, "revit-unique-1");
 });
 
 test("metadata normalizer preserves existing canonical IFC metadata", () => {

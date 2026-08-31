@@ -88,50 +88,16 @@ function revitProperties(element: JsonRecord, uniqueId: string): SymetriqPropert
     ];
 }
 
-function propertyType(definition: RevitSourceParameterDefinition | undefined): string | undefined {
-    switch (definition?.storageType) {
-        case "Integer": return "integer";
-        case "Double": return "number";
-        case "ElementId": return "elementId";
-        case "String": return "string";
-        default: return undefined;
-    }
-}
-
-function sourceProperties(
-    values: RevitSourceParameterValue[],
-    definitions: Map<string, RevitSourceParameterDefinition>,
-): SymetriqProperty[] {
-    const names = new Set<string>();
-    return values.map((value) => {
-        const definition = definitions.get(value.parameterId);
-        const baseName = definition?.name || value.parameterId;
-        const name = names.has(baseName) ? `${baseName} [${value.parameterId}]` : baseName;
-        names.add(baseName);
-        const property: SymetriqProperty = {
-            name,
-            value: value.displayValue ?? value.rawValue,
-        };
-        const type = propertyType(definition);
-        if (type) property.type = type;
-        if (definition) {
-            property.description = [
-                definition.parameterId,
-                definition.specTypeId ?? undefined,
-                definition.unitTypeId ?? undefined,
-            ].filter((part): part is string => Boolean(part)).join("; ");
-        }
-        return property;
-    });
-}
-
 /**
  * Projects normalized Revit source metadata into the established canonical
- * Viewer contract. The full producer document stays in source-metadata.json;
- * this method intentionally creates only the Viewer representation.
+ * Viewer contract. The full producer document stays in source-metadata.json.
+ *
+ * Deliberately do not expand the full source parameter graph here. On large
+ * projects that turns a deduplicated producer file into hundreds of megabytes
+ * of duplicated Viewer property sets and can exceed V8's single-string limit.
+ * Canonical semantic property-set mapping is a separate, Hub-owned milestone.
  */
 function normalizeRevitSourceMetadata(metadata: RevitSourceMetadataV1): SymetriqMetadata {
-    const definitions = new Map(metadata.parameterDefinitions.map((definition) => [definition.parameterId, definition]));
     const types = new Map(metadata.types.map((type) => [type.typeId, type]));
     const elements: Record<string, SymetriqElement> = {};
     const propertySets: Record<string, SymetriqPropertySet> = {};
@@ -144,12 +110,7 @@ function normalizeRevitSourceMetadata(metadata: RevitSourceMetadataV1): Symetriq
         const family = text(sourceElement.family, type?.familyName ? text(type.familyName) : "");
         const typeName = text(sourceElement.type, type?.name ? text(type.name) : "");
         const identityPropertySetId = `revit:${sourceElementId}:identity`;
-        const instancePropertySetId = `revit:${sourceElementId}:instance`;
-        const typePropertySetId = type ? `revit:type:${type.typeId}` : undefined;
         const propertySetIds = [identityPropertySetId];
-
-        if (sourceElement.instanceParameterValues.length > 0) propertySetIds.push(instancePropertySetId);
-        if (type && type.parameterValues.length > 0 && typePropertySetId) propertySetIds.push(typePropertySetId);
 
         elements[sourceElementId] = {
             globalId: sourceElementId,
@@ -169,22 +130,6 @@ function normalizeRevitSourceMetadata(metadata: RevitSourceMetadataV1): Symetriq
                 { name: "Type", value: typeName, type: "string" },
             ],
         };
-        if (sourceElement.instanceParameterValues.length > 0) {
-            propertySets[instancePropertySetId] = {
-                id: instancePropertySetId,
-                name: "Revit Instance Parameters",
-                type: "Revit",
-                properties: sourceProperties(sourceElement.instanceParameterValues, definitions),
-            };
-        }
-        if (type && type.parameterValues.length > 0 && typePropertySetId && !propertySets[typePropertySetId]) {
-            propertySets[typePropertySetId] = {
-                id: typePropertySetId,
-                name: "Revit Type Parameters",
-                type: "Revit",
-                properties: sourceProperties(type.parameterValues, definitions),
-            };
-        }
     }
 
     return { version: 2, elements, propertySets, levels: [] };
@@ -244,9 +189,12 @@ export class PublishMetadataNormalizer {
     }
 
     normalizeFile(sourceMetadataPath: string, canonicalMetadataPath = sourceMetadataPath): SymetriqMetadata {
+        const sourceBytes = fs.statSync(sourceMetadataPath).size;
         const metadata = JSON.parse(fs.readFileSync(sourceMetadataPath, "utf8")) as unknown;
         const normalized = this.normalize(metadata);
-        fs.writeFileSync(canonicalMetadataPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+        const serialized = `${JSON.stringify(normalized, null, 2)}\n`;
+        fs.writeFileSync(canonicalMetadataPath, serialized, "utf8");
+        console.info(`[Publish metadata] source ${(sourceBytes / 1024 / 1024).toFixed(2)} MB -> canonical ${(Buffer.byteLength(serialized) / 1024 / 1024).toFixed(2)} MB`);
         return normalized;
     }
 }
