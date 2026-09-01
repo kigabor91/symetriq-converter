@@ -26,6 +26,16 @@ export interface StoredElementProperties {
     family: string | null; type: string | null; properties: StoredCanonicalProperty[];
 }
 
+/** Source-neutral definition record consumed by the Viewer configuration UI. */
+export interface CanonicalPropertyDefinition {
+    propertyDefinitionId: string;
+    propertySetName: string;
+    displayName: string;
+    valueType: string | null;
+    unit: string | null;
+    scope: "instance" | "type";
+}
+
 function text(value: unknown): string | null { return typeof value === "string" && value.length > 0 ? value : null; }
 function json(value: unknown): string { return JSON.stringify(value) ?? "null"; }
 function hash(value: string): Buffer { return createHash("sha256").update(value).digest(); }
@@ -186,6 +196,28 @@ export class CanonicalPropertyStore {
         try { sourceElementId = (database.prepare("SELECT source_element_id FROM render_objects WHERE render_object_id = ?").get(renderObjectId) as { source_element_id: string } | undefined)?.source_element_id; }
         finally { database.close(); }
         return sourceElementId ? this.getElementProperties(databasePath, sourceElementId) : undefined;
+    }
+
+    getPropertyDefinitions(databasePath: string): CanonicalPropertyDefinition[] {
+        const database = new DatabaseSync(databasePath, { readOnly: true });
+        try {
+            const rows = database.prepare(`
+                SELECT DISTINCT definition.parameter_id, definition.name, definition.storage_type, definition.unit_type_id, sets.scope
+                FROM property_definitions definition
+                JOIN property_values value ON value.definition_key = definition.definition_key
+                JOIN property_set_values set_value ON set_value.property_value_id = value.property_value_id
+                JOIN property_sets sets ON sets.property_set_id = set_value.property_set_id
+                ORDER BY sets.scope, definition.name, definition.parameter_id
+            `).all() as Array<{ parameter_id: string; name: string; storage_type: string | null; unit_type_id: string | null; scope: "instance" | "type" }>;
+            return rows.map((row) => ({
+                propertyDefinitionId: `canonical:${row.scope}:${row.parameter_id}`,
+                propertySetName: row.scope === "instance" ? "Instance Parameters" : "Type Parameters",
+                displayName: row.name,
+                valueType: row.storage_type,
+                unit: row.unit_type_id,
+                scope: row.scope,
+            }));
+        } finally { database.close(); }
     }
 
     getFacetValues(databasePath: string, facet: "category" | "family" | "type"): string[] {

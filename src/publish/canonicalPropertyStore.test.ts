@@ -46,6 +46,10 @@ test("canonical property store deduplicates Revit definitions, values and proper
         assert.equal(stats.analysis.topFrequentProperties[0]?.name, "Asset Code");
         assert.ok(stats.databaseBytes > 0);
         assert.deepEqual(store.getFacetValues(databasePath, "category"), ["Pipes"]);
+        assert.deepEqual(store.getPropertyDefinitions(databasePath), [
+            { propertyDefinitionId: "canonical:instance:shared:asset", propertySetName: "Instance Parameters", displayName: "Asset Code", valueType: "String", unit: null, scope: "instance" },
+            { propertyDefinitionId: "canonical:type:bip:diameter", propertySetName: "Type Parameters", displayName: "Diameter", valueType: "Double", unit: "millimeters", scope: "type" },
+        ]);
         assert.deepEqual(store.getElementProperties(databasePath, "revit-one"), {
             logicalElementId: "logical-one",
             sourceElementId: "revit-one",
@@ -66,6 +70,28 @@ test("canonical property store deduplicates Revit definitions, values and proper
         });
     } finally {
         fs.rmSync(directory, { recursive: true, force: true });
+    }
+});
+
+test("property definition catalogs are empty for empty metadata and isolated per Store", () => {
+    const first = fs.mkdtempSync(path.join(os.tmpdir(), "symetriq-catalog-first-"));
+    const second = fs.mkdtempSync(path.join(os.tmpdir(), "symetriq-catalog-second-"));
+    try {
+        const store = new CanonicalPropertyStore();
+        const empty: RevitSourceMetadataV1 = { version: "1.0", sourceKind: "revit", parameterDefinitions: [], types: [], elements: [] };
+        store.build(empty, first, 0);
+        assert.deepEqual(store.getPropertyDefinitions(path.join(first, CanonicalPropertyStore.databaseFilename)), []);
+        const source: RevitSourceMetadataV1 = {
+            ...empty,
+            parameterDefinitions: [{ parameterId: "only-second", name: "Second only", scopes: ["instance"], storageType: "String" }],
+            elements: [{ logicalElementId: "second", sourceElementId: "second", category: "Generic", instanceParameterValues: [{ parameterId: "only-second", rawValue: "x", displayValue: "x" }] }],
+        };
+        store.build(source, second, 1);
+        assert.equal(store.getPropertyDefinitions(path.join(second, CanonicalPropertyStore.databaseFilename))[0]?.displayName, "Second only");
+        assert.deepEqual(store.getPropertyDefinitions(path.join(first, CanonicalPropertyStore.databaseFilename)), []);
+    } finally {
+        fs.rmSync(first, { recursive: true, force: true });
+        fs.rmSync(second, { recursive: true, force: true });
     }
 });
 

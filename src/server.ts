@@ -333,6 +333,7 @@ app.get("/api/projects/:projectId/models/:modelId/render-objects/:renderObjectId
             name: property.name,
             value: property.displayValue ?? property.rawValue,
             type: property.storageType ?? "string",
+            propertyDefinitionId: `canonical:${scope}:${property.parameterId}`,
             parameterId: property.parameterId,
             rawValue: property.rawValue,
             displayValue: property.displayValue,
@@ -354,6 +355,44 @@ app.get("/api/projects/:projectId/models/:modelId/render-objects/:renderObjectId
         type: record.type,
         propertySets,
     });
+});
+
+app.get("/api/projects/:projectId/models/:modelId/property-definitions", (request, response) => {
+    const projectId = String(request.params.projectId ?? "");
+    const modelId = String(request.params.modelId ?? "");
+    const project = readProjects().find((candidate) => candidate.id === projectId);
+    if (!project) {
+        response.status(404).json({ error: "Project not found." });
+        return;
+    }
+    const model = project.files.find((file) => file.id === modelId && file.model);
+    if (!model) {
+        response.status(404).json({ error: "Model not found in this project." });
+        return;
+    }
+    const propertyStorePath = path.join(getDataDirectory(), "publish-workspaces", modelId, CanonicalPropertyStore.databaseFilename);
+    if (fs.existsSync(propertyStorePath)) {
+        response.json(new CanonicalPropertyStore().getPropertyDefinitions(propertyStorePath));
+        return;
+    }
+    const metadataPath = path.join(getProjectDirectory(projectId), "converted", modelId, `${modelId}.metadata.json`);
+    if (!fs.existsSync(metadataPath)) {
+        response.status(404).json({ error: "Property definitions are not available for this model." });
+        return;
+    }
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8")) as {
+        propertySets?: Record<string, { id?: string; name?: string; properties?: Array<{ name?: string; type?: string }> }>;
+    };
+    const definitions = new Map<string, { propertyDefinitionId: string; propertySetName: string; displayName: string; valueType: string | null; unit: null; scope: "instance" }>();
+    Object.values(metadata.propertySets ?? {}).forEach((propertySet) => {
+        const propertySetName = propertySet.name ?? "Properties";
+        (propertySet.properties ?? []).forEach((property) => {
+            if (!property.name) return;
+            const propertyDefinitionId = `${propertySetName}::${property.name}`;
+            definitions.set(propertyDefinitionId, { propertyDefinitionId, propertySetName, displayName: property.name, valueType: property.type ?? null, unit: null, scope: "instance" });
+        });
+    });
+    response.json([...definitions.values()].sort((left, right) => `${left.propertySetName}:${left.displayName}`.localeCompare(`${right.propertySetName}:${right.displayName}`)));
 });
 
 app.put("/api/projects/:projectId", (request, response) => {

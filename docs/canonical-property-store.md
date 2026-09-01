@@ -211,3 +211,24 @@ usage. The Store implementation uses integer relationship keys, a
 display-string dictionary, compact binary set hashes and removes the previous
 redundant definition/value index. These changes affect only the internal
 SQLite layout, not the retrieval response contract.
+
+## 003C: Property Definition Catalog
+
+The Hub exposes a source-neutral, value-free definition catalog:
+
+```text
+GET /api/projects/{projectId}/models/{modelId}/property-definitions
+```
+
+Each entry contains only `propertyDefinitionId`, `propertySetName`,
+`displayName`, `valueType`, `unit` and `scope`; it contains neither elements
+nor property values. For Revit publishes the catalog comes from the Store's
+deduplicated definitions and actual instance/type assignments. Existing IFC
+metadata is adapted by the Hub into the same response shape, so the Viewer has
+no source-specific branch.
+
+The Viewer requests the catalog only when **Visible properties** opens and
+caches it per model for the browser session. Compact-panel settings store
+definition IDs, while selected-element values continue to come exclusively
+from the existing element-property retrieval endpoint. A missing value is
+omitted rather than rendered as an empty row.
