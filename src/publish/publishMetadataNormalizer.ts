@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import type {
+    SymetriqLevel,
     SymetriqElement,
     SymetriqMetadata,
     SymetriqProperty,
@@ -69,6 +70,11 @@ function normalizeRevitSourceMetadata(
     const sourcesByLogicalId = new Map(metadata.elements.map((element) => [element.logicalElementId, element]));
     const elements: Record<string, SymetriqElement> = {};
     const propertySets: Record<string, SymetriqPropertySet> = {};
+    const levels: SymetriqLevel[] = (metadata.levels ?? [])
+        .filter((level) => Number.isFinite(level.elevation))
+        .map((level) => ({ id: level.id, name: level.name || level.id, elevation: level.elevation, source: level.source || "revit", method: level.method || "explicit" }))
+        .sort((left, right) => left.elevation - right.elevation || left.id.localeCompare(right.id));
+    const knownLevelIds = new Set(levels.map((level) => level.id));
 
     const projectionEntries = objectMap?.renderObjects.map((renderObject) => ({
         sourceElement: sourcesByLogicalId.get(renderObject.logicalElementId),
@@ -95,6 +101,7 @@ function normalizeRevitSourceMetadata(
             type: category,
             name: family && typeName ? `${family} - ${typeName}` : family || typeName || category,
             propertySetIds: [],
+            ...(sourceElement.levelId && knownLevelIds.has(sourceElement.levelId) ? { parentId: sourceElement.levelId } : {}),
             identity: {
                 logicalElementId: sourceElement.logicalElementId,
                 revitUniqueId: sourceElement.sourceElementId,
@@ -103,10 +110,13 @@ function normalizeRevitSourceMetadata(
                 type: typeName,
             },
             propertyStore: { renderObjectId: entry.renderObjectId },
+            spatial: sourceElement.levelId && knownLevelIds.has(sourceElement.levelId)
+                ? { levelId: sourceElement.levelId, levelAssignment: "explicit" }
+                : { levelAssignment: "unknown" },
         };
     }
 
-    return { version: 2, elements, propertySets, levels: [] };
+    return { version: 2, elements, propertySets, levels };
 }
 
 /**

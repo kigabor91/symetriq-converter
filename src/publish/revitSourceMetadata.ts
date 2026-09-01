@@ -35,6 +35,17 @@ export interface RevitSourceElement {
     family?: string | null;
     type?: string | null;
     instanceParameterValues: RevitSourceParameterValue[];
+    levelId?: string | null;
+    levelAssignment?: "explicit" | "unknown";
+}
+
+export interface RevitSourceLevel {
+    id: string;
+    name: string;
+    elevation: number;
+    sortOrder: number;
+    source: "revit" | string;
+    method: "explicit" | string;
 }
 
 export interface RevitSourceMetadataV1 {
@@ -43,6 +54,7 @@ export interface RevitSourceMetadataV1 {
     parameterDefinitions: RevitSourceParameterDefinition[];
     types: RevitSourceType[];
     elements: RevitSourceElement[];
+    levels?: RevitSourceLevel[];
 }
 
 export interface PublishObjectMapRenderObject {

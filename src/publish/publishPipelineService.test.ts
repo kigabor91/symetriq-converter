@@ -130,12 +130,17 @@ test("normalized Revit source metadata retains full parameters while the Viewer 
         elements: [{
             logicalElementId: "le-1", sourceElementId: "revit-unique-1", typeId: "revit-type:type-1",
             category: "Pipes", family: "Pipe Types", type: "DN100",
+            levelId: "level-02", levelAssignment: "explicit",
             instanceParameterValues: [{ parameterId: "shared:guid-1", rawValue: "P-01", displayValue: "P-01" }],
         }, {
             logicalElementId: "le-2", sourceElementId: "revit-unique-2", typeId: "revit-type:type-1",
             category: "Pipes", family: "Pipe Types", type: "DN100",
             instanceParameterValues: [],
         }],
+        levels: [
+            { id: "level-02", name: "Level 02", elevation: 3.6, sortOrder: 1, source: "revit", method: "explicit" },
+            { id: "level-01", name: "Level 01", elevation: 0, sortOrder: 0, source: "revit", method: "explicit" },
+        ],
     };
 
     const normalized = new PublishMetadataNormalizer().normalize(sourceMetadata);
@@ -144,6 +149,13 @@ test("normalized Revit source metadata retains full parameters while the Viewer 
     assert.deepEqual(normalized.elements["revit-unique-1"]!.propertySetIds, []);
     assert.equal(normalized.elements["revit-unique-1"]!.identity?.revitUniqueId, "revit-unique-1");
     assert.equal(normalized.elements["revit-unique-1"]!.propertyStore?.renderObjectId, "legacy:revit-unique-1");
+    assert.equal(normalized.elements["revit-unique-1"]!.parentId, "level-02");
+    assert.deepEqual(normalized.elements["revit-unique-1"]!.spatial, { levelId: "level-02", levelAssignment: "explicit" });
+    assert.deepEqual(normalized.elements["revit-unique-2"]!.spatial, { levelAssignment: "unknown" });
+    assert.deepEqual(normalized.levels, [
+        { id: "level-01", name: "Level 01", elevation: 0, source: "revit", method: "explicit" },
+        { id: "level-02", name: "Level 02", elevation: 3.6, source: "revit", method: "explicit" },
+    ]);
     assert.equal(Object.keys(normalized.propertySets).length, 0);
 });
 

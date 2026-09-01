@@ -30,6 +30,7 @@ test("canonical property store deduplicates Revit definitions, values and proper
                 type: "DN100",
                 instanceParameterValues: [{ parameterId: "shared:asset", rawValue: "P-01", displayValue: "P-01" }],
             })),
+            levels: [{ id: "level-01", name: "Level 01", elevation: 0, sortOrder: 0, source: "revit", method: "explicit" }],
         };
         const store = new CanonicalPropertyStore();
         const stats = store.build(source, directory, Buffer.byteLength(JSON.stringify(source)));
@@ -41,6 +42,7 @@ test("canonical property store deduplicates Revit definitions, values and proper
         assert.equal(stats.propertySets, 2);
         assert.equal(stats.types, 1);
         assert.equal(stats.elements, 2);
+        assert.equal(stats.levels, 1);
         assert.equal(stats.analysis.instancePropertyCount, 2);
         assert.equal(stats.analysis.typePropertyCount, 1);
         assert.equal(stats.analysis.topFrequentProperties[0]?.name, "Asset Code");

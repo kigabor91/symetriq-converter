@@ -126,11 +126,13 @@ export class CanonicalPropertyStore {
             const insertSet = database.prepare("INSERT OR IGNORE INTO property_sets VALUES (NULL, ?, ?)");
             const findSet = database.prepare("SELECT property_set_id FROM property_sets WHERE signature_hash = ?");
             const insertSetValue = database.prepare("INSERT OR IGNORE INTO property_set_values VALUES (?, ?)");
+            const insertLevel = database.prepare("INSERT INTO levels VALUES (?, ?, ?, ?, ?)");
             const insertType = database.prepare("INSERT INTO types VALUES (?, ?, ?, ?, ?)");
             const insertElement = database.prepare("INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?)");
             const insertFacet = database.prepare("INSERT OR IGNORE INTO facet_index VALUES (?, ?, ?)");
             const insertRenderObject = database.prepare("INSERT INTO render_objects VALUES (?, ?, ?, ?, ?)");
             database.exec("BEGIN");
+            (source.levels ?? []).forEach((level) => insertLevel.run(level.id, level.name, level.elevation, level.source, level.method));
             source.parameterDefinitions.forEach((definition) => {
                 insertDefinition.run(definition.parameterId, definition.name, json(definition.scopes ?? []), text(definition.source), text(definition.builtInParameter), text(definition.sharedParameterGuid), text(definition.parameterGroup), text(definition.storageType), text(definition.specTypeId), text(definition.unitTypeId), definition.isReadOnly === undefined ? null : Number(definition.isReadOnly), definition.isVisible === undefined ? null : Number(definition.isVisible));
                 definitionKeys.set(definition.parameterId, Number((findDefinition.get(definition.parameterId) as { definition_key: number }).definition_key));

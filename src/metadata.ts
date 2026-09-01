@@ -29,6 +29,8 @@ export interface SymetriqElement {
         type: string;
     };
     propertyStore?: { renderObjectId: string };
+    /** Explicit source spatial assignment. Absence is never inferred by the Viewer. */
+    spatial?: { levelId?: string; levelAssignment: "explicit" | "unknown" };
 }
 
 /** Source-neutral spatial level, expressed in the model's local vertical axis (metres). */
@@ -36,8 +38,8 @@ export interface SymetriqLevel {
     id: string;
     name: string;
     elevation: number;
-    source: "ifc";
-    method: "explicit";
+    source: string;
+    method: string;
 }
 
 export interface SymetriqMetadata {

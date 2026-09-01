@@ -485,7 +485,7 @@ app.put("/api/projects/:projectId/plan-settings", (request, response) => {
     const referenceId = request.body?.planReferenceModelId;
     const range = request.body?.planViewRange;
     if (referenceId !== undefined && typeof referenceId !== "string") {
-        response.status(400).json({ error: "Plan reference must be an IFC model ID." });
+        response.status(400).json({ error: "Plan reference must be a model ID." });
         return;
     }
     if (range !== undefined && (!range || ![range.lower, range.cut, range.upper].every((value: unknown) => typeof value === "number") || range.lower > range.cut || range.cut > range.upper)) {
@@ -494,8 +494,8 @@ app.put("/api/projects/:projectId/plan-settings", (request, response) => {
     }
     const project = updateProject(projectId, (storedProject) => {
         if (referenceId !== undefined) {
-            const isIfc = storedProject.files.some((file) => file.id === referenceId && file.kind === "ifc");
-            if (!isIfc) throw new Error("The selected plan reference is not an IFC model.");
+            const isModel = storedProject.files.some((file) => file.id === referenceId && file.model);
+            if (!isModel) throw new Error("The selected plan reference is not a model.");
             storedProject.planReferenceModelId = referenceId;
         }
         if (range !== undefined) storedProject.planViewRange = range;
