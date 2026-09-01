@@ -46,10 +46,20 @@ test("canonical property store deduplicates Revit definitions, values and proper
         assert.equal(stats.analysis.topFrequentProperties[0]?.name, "Asset Code");
         assert.ok(stats.databaseBytes > 0);
         assert.deepEqual(store.getFacetValues(databasePath, "category"), ["Pipes"]);
-        assert.deepEqual(store.getPropertyDefinitions(databasePath), [
+        assert.deepEqual(store.getPropertyDefinitions(databasePath).slice(0, 2), [
             { propertyDefinitionId: "canonical:instance:shared:asset", propertySetName: "Instance Parameters", displayName: "Asset Code", valueType: "String", unit: null, scope: "instance" },
             { propertyDefinitionId: "canonical:type:bip:diameter", propertySetName: "Type Parameters", displayName: "Diameter", valueType: "Double", unit: "millimeters", scope: "type" },
         ]);
+        const assetValues = store.getPropertyValues(databasePath, "canonical:instance:shared:asset");
+        assert.equal(assetValues.length, 1);
+        assert.equal(assetValues[0]?.displayValue, "P-01");
+        assert.equal(assetValues[0]?.count, 2);
+        assert.deepEqual(store.getPropertyValues(databasePath, "canonical:facet:category"), [
+            { valueId: "value:Pipes", displayValue: "Pipes", count: 2 },
+        ]);
+        assert.deepEqual(store.getMatchingViewerObjectIds(databasePath, "canonical:instance:shared:asset", [assetValues[0]!.valueId]), ["revit-one", "revit-two"]);
+        assert.deepEqual(store.getMatchingViewerObjectIds(databasePath, "canonical:instance:shared:asset", ["value:999"]), []);
+        assert.deepEqual(store.getMatchingViewerObjectIds(databasePath, "canonical:facet:category", ["value:Pipes"]), ["revit-one", "revit-two"]);
         assert.deepEqual(store.getElementProperties(databasePath, "revit-one"), {
             logicalElementId: "logical-one",
             sourceElementId: "revit-one",

@@ -8,6 +8,7 @@ import { convertIfc } from "./convert.js";
 import { convertE57 } from "./convertE57.js";
 import { createPublishRouter } from "./publish/publishRoutes.js";
 import { CanonicalPropertyStore } from "./publish/canonicalPropertyStore.js";
+import { queryCanonicalMetadataProperty } from "./publish/canonicalMetadataQuery.js";
 import {
     getDataDirectory,
     getProjectDirectory,
@@ -35,6 +36,7 @@ const upload = multer({
 });
 
 const supportedFileExtensions = new Set([".ifc", ".las", ".laz", ".e57"]);
+
 // Preserve the dense E57 LOD wiring for a future streamed renderer, while
 // keeping it off in the MVP to avoid generating a GPU-heavy 1/10 point cloud.
 const enableBalancedE57Lod = false;
@@ -388,11 +390,75 @@ app.get("/api/projects/:projectId/models/:modelId/property-definitions", (reques
         const propertySetName = propertySet.name ?? "Properties";
         (propertySet.properties ?? []).forEach((property) => {
             if (!property.name) return;
-            const propertyDefinitionId = `${propertySetName}::${property.name}`;
+            const propertyDefinitionId = `canonical:instance:${propertySetName}:${property.name}`;
             definitions.set(propertyDefinitionId, { propertyDefinitionId, propertySetName, displayName: property.name, valueType: property.type ?? null, unit: null, scope: "instance" });
         });
     });
+    (["category", "family", "type"] as const).forEach((facet) => {
+        const hasValues = Object.values((metadata as { elements?: Record<string, { identity?: Record<string, string | undefined> }> }).elements ?? {}).some((element) => Boolean(element.identity?.[facet]));
+        if (hasValues) definitions.set(`canonical:facet:${facet}`, {
+            propertyDefinitionId: `canonical:facet:${facet}`,
+            propertySetName: "Identity",
+            displayName: facet.charAt(0).toUpperCase() + facet.slice(1),
+            valueType: "string",
+            unit: null,
+            scope: "instance",
+        });
+    });
     response.json([...definitions.values()].sort((left, right) => `${left.propertySetName}:${left.displayName}`.localeCompare(`${right.propertySetName}:${right.displayName}`)));
+});
+
+function resolveCanonicalPropertySource(projectId: string, modelId: string) {
+    const project = readProjects().find((candidate) => candidate.id === projectId);
+    if (!project) return { error: "Project not found." } as const;
+    const model = project.files.find((file) => file.id === modelId && file.model);
+    if (!model) return { error: "Model not found in this project." } as const;
+    const storePath = path.join(getDataDirectory(), "publish-workspaces", modelId, CanonicalPropertyStore.databaseFilename);
+    const metadataPath = path.join(getProjectDirectory(projectId), "converted", modelId, `${modelId}.metadata.json`);
+    return { storePath, metadataPath } as const;
+}
+
+app.get("/api/projects/:projectId/models/:modelId/property-definitions/:propertyDefinitionId/values", (request, response) => {
+    const projectId = String(request.params.projectId ?? "");
+    const modelId = String(request.params.modelId ?? "");
+    const propertyDefinitionId = String(request.params.propertyDefinitionId ?? "");
+    const source = resolveCanonicalPropertySource(projectId, modelId);
+    if ("error" in source) {
+        response.status(404).json({ error: source.error });
+        return;
+    }
+    if (fs.existsSync(source.storePath)) {
+        response.json(new CanonicalPropertyStore().getPropertyValues(source.storePath, propertyDefinitionId));
+        return;
+    }
+    if (!fs.existsSync(source.metadataPath)) {
+        response.status(404).json({ error: "Property values are not available for this model." });
+        return;
+    }
+    response.json(queryCanonicalMetadataProperty(source.metadataPath, propertyDefinitionId).values);
+});
+
+app.get("/api/projects/:projectId/models/:modelId/property-definitions/:propertyDefinitionId/matches", (request, response) => {
+    const projectId = String(request.params.projectId ?? "");
+    const modelId = String(request.params.modelId ?? "");
+    const propertyDefinitionId = String(request.params.propertyDefinitionId ?? "");
+    const values = typeof request.query.values === "string"
+        ? request.query.values.split(",").filter(Boolean)
+        : [];
+    const source = resolveCanonicalPropertySource(projectId, modelId);
+    if ("error" in source) {
+        response.status(404).json({ error: source.error });
+        return;
+    }
+    if (fs.existsSync(source.storePath)) {
+        response.json({ rendererObjectIds: new CanonicalPropertyStore().getMatchingViewerObjectIds(source.storePath, propertyDefinitionId, values) });
+        return;
+    }
+    if (!fs.existsSync(source.metadataPath)) {
+        response.status(404).json({ error: "Property matches are not available for this model." });
+        return;
+    }
+    response.json(queryCanonicalMetadataProperty(source.metadataPath, propertyDefinitionId, values));
 });
 
 app.put("/api/projects/:projectId", (request, response) => {

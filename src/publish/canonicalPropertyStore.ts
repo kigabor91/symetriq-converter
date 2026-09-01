@@ -35,6 +35,7 @@ export interface CanonicalPropertyDefinition {
     unit: string | null;
     scope: "instance" | "type";
 }
+export interface CanonicalPropertyValue { valueId: string; displayValue: string; count: number; }
 
 function text(value: unknown): string | null { return typeof value === "string" && value.length > 0 ? value : null; }
 function json(value: unknown): string { return JSON.stringify(value) ?? "null"; }
@@ -209,14 +210,68 @@ export class CanonicalPropertyStore {
                 JOIN property_sets sets ON sets.property_set_id = set_value.property_set_id
                 ORDER BY sets.scope, definition.name, definition.parameter_id
             `).all() as Array<{ parameter_id: string; name: string; storage_type: string | null; unit_type_id: string | null; scope: "instance" | "type" }>;
-            return rows.map((row) => ({
+            return [
+                ...rows.map((row) => ({
                 propertyDefinitionId: `canonical:${row.scope}:${row.parameter_id}`,
                 propertySetName: row.scope === "instance" ? "Instance Parameters" : "Type Parameters",
                 displayName: row.name,
                 valueType: row.storage_type,
                 unit: row.unit_type_id,
                 scope: row.scope,
-            }));
+                })),
+                ...(count(database, "elements") === 0 ? [] : (["category", "family", "type"] as const).map((facet) => ({
+                    propertyDefinitionId: `canonical:facet:${facet}`,
+                    propertySetName: "Identity",
+                    displayName: facet.charAt(0).toUpperCase() + facet.slice(1),
+                    valueType: "string",
+                    unit: null,
+                    scope: "instance" as const,
+                }))),
+            ];
+        } finally { database.close(); }
+    }
+
+    getPropertyValues(databasePath: string, definitionId: string): CanonicalPropertyValue[] {
+        const facet = /^canonical:facet:(category|family|type)$/.exec(definitionId)?.[1];
+        if (facet) {
+            const database = new DatabaseSync(databasePath, { readOnly: true });
+            try {
+                return (database.prepare(`SELECT e.${facet} AS value, COUNT(DISTINCT e.source_element_id) AS count FROM elements e WHERE e.${facet} IS NOT NULL AND e.${facet} <> '' GROUP BY e.${facet} ORDER BY e.${facet}`).all() as Array<{ value: string; count: number }>).map((row) => ({ valueId: `value:${encodeURIComponent(row.value)}`, displayValue: row.value, count: Number(row.count) }));
+            } finally { database.close(); }
+        }
+        const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
+        if (!match) return [];
+        const scope = match[1] as "instance" | "type";
+        const parameterId = match[2]!;
+        const database = new DatabaseSync(databasePath, { readOnly: true });
+        try {
+            const joins = scope === "instance" ? "JOIN elements e ON e.instance_property_set_id = sets.property_set_id" : "JOIN types t ON t.property_set_id = sets.property_set_id JOIN elements e ON e.type_id = t.type_id";
+            const rows = database.prepare(`SELECT value.property_value_id, value.raw_value_json, dictionary.value AS display_value, COUNT(DISTINCT e.source_element_id) AS count FROM property_definitions d JOIN property_values value ON value.definition_key=d.definition_key JOIN property_set_values sv ON sv.property_value_id=value.property_value_id JOIN property_sets sets ON sets.property_set_id=sv.property_set_id ${joins} LEFT JOIN string_dictionary dictionary ON dictionary.string_id=value.display_string_id WHERE d.parameter_id=? AND sets.scope=? GROUP BY value.property_value_id ORDER BY COALESCE(dictionary.value,value.raw_value_json)`).all(parameterId, scope) as Array<{property_value_id:number;raw_value_json:string;display_value:string|null;count:number}>;
+            return rows.map((row) => { const raw = JSON.parse(row.raw_value_json) as unknown; return { valueId: `value:${row.property_value_id}`, displayValue: row.display_value ?? defaultDisplayValue(raw) ?? "", count: Number(row.count) }; });
+        } finally { database.close(); }
+    }
+
+    getMatchingViewerObjectIds(databasePath: string, definitionId: string, valueIds: string[]): string[] {
+        const facet = /^canonical:facet:(category|family|type)$/.exec(definitionId)?.[1];
+        if (facet) {
+            const values = valueIds.map((id) => /^value:(.*)$/.exec(id)?.[1]).filter((value): value is string => value !== undefined).map(decodeURIComponent);
+            if (values.length === 0) return [];
+            const database = new DatabaseSync(databasePath, { readOnly: true });
+            try {
+                const marks = values.map(() => "?").join(",");
+                return (database.prepare(`SELECT DISTINCT r.viewer_object_id FROM elements e JOIN render_objects r ON r.source_element_id=e.source_element_id WHERE e.${facet} IN (${marks})`).all(...values) as Array<{ viewer_object_id: string }>).map((row) => row.viewer_object_id);
+            } finally { database.close(); }
+        }
+        const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
+        const ids = valueIds.map((id) => Number(/^value:(\d+)$/.exec(id)?.[1])).filter(Number.isInteger);
+        if (!match || ids.length === 0) return [];
+        const scope = match[1] as "instance" | "type";
+        const parameterId = match[2]!;
+        const database = new DatabaseSync(databasePath, { readOnly: true });
+        try {
+            const joins = scope === "instance" ? "JOIN elements e ON e.instance_property_set_id = sets.property_set_id" : "JOIN types t ON t.property_set_id = sets.property_set_id JOIN elements e ON e.type_id = t.type_id";
+            const marks = ids.map(() => "?").join(",");
+            return (database.prepare(`SELECT DISTINCT r.viewer_object_id FROM property_definitions d JOIN property_values value ON value.definition_key=d.definition_key JOIN property_set_values sv ON sv.property_value_id=value.property_value_id JOIN property_sets sets ON sets.property_set_id=sv.property_set_id ${joins} JOIN render_objects r ON r.source_element_id=e.source_element_id WHERE d.parameter_id=? AND sets.scope=? AND value.property_value_id IN (${marks})`).all(parameterId, scope, ...ids) as Array<{viewer_object_id:string}>).map((row) => row.viewer_object_id);
         } finally { database.close(); }
     }
 
