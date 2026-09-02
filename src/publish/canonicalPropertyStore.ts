@@ -43,6 +43,19 @@ function hash(value: string): Buffer { return createHash("sha256").update(value)
 function count(database: DatabaseSync, table: string): number { return Number((database.prepare(`SELECT COUNT(*) AS value FROM ${table}`).get() as { value: number }).value); }
 function defaultDisplayValue(rawValue: unknown): string | null { return rawValue === null || rawValue === undefined ? null : String(rawValue); }
 
+type CanonicalFacet = "category" | "family" | "type";
+type ElementFacetColumn = "category" | "family" | "type_name";
+
+function canonicalFacet(definitionId: string): CanonicalFacet | undefined {
+    const match = /^canonical:facet:(category|family|type)$/.exec(definitionId);
+    return match?.[1] as CanonicalFacet | undefined;
+}
+
+/** Keeps the public canonical facet contract independent from SQLite column names. */
+function elementFacetColumn(facet: CanonicalFacet): ElementFacetColumn {
+    return facet === "type" ? "type_name" : facet;
+}
+
 function pageUsage(database: DatabaseSync): CanonicalPropertyStoreAnalysis["sqlite"] {
     const pageSize = Number((database.prepare("PRAGMA page_size").get() as { page_size: number }).page_size);
     const pageCount = Number((database.prepare("PRAGMA page_count").get() as { page_count: number }).page_count);
@@ -234,11 +247,12 @@ export class CanonicalPropertyStore {
     }
 
     getPropertyValues(databasePath: string, definitionId: string): CanonicalPropertyValue[] {
-        const facet = /^canonical:facet:(category|family|type)$/.exec(definitionId)?.[1];
+        const facet = canonicalFacet(definitionId);
         if (facet) {
+            const column = elementFacetColumn(facet);
             const database = new DatabaseSync(databasePath, { readOnly: true });
             try {
-                return (database.prepare(`SELECT e.${facet} AS value, COUNT(DISTINCT e.source_element_id) AS count FROM elements e WHERE e.${facet} IS NOT NULL AND e.${facet} <> '' GROUP BY e.${facet} ORDER BY e.${facet}`).all() as Array<{ value: string; count: number }>).map((row) => ({ valueId: `value:${encodeURIComponent(row.value)}`, displayValue: row.value, count: Number(row.count) }));
+                return (database.prepare(`SELECT e.${column} AS value, COUNT(DISTINCT e.source_element_id) AS count FROM elements e WHERE e.${column} IS NOT NULL AND e.${column} <> '' GROUP BY e.${column} ORDER BY e.${column}`).all() as Array<{ value: string; count: number }>).map((row) => ({ valueId: `value:${encodeURIComponent(row.value)}`, displayValue: row.value, count: Number(row.count) }));
             } finally { database.close(); }
         }
         const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
@@ -254,14 +268,15 @@ export class CanonicalPropertyStore {
     }
 
     getMatchingViewerObjectIds(databasePath: string, definitionId: string, valueIds: string[]): string[] {
-        const facet = /^canonical:facet:(category|family|type)$/.exec(definitionId)?.[1];
+        const facet = canonicalFacet(definitionId);
         if (facet) {
+            const column = elementFacetColumn(facet);
             const values = valueIds.map((id) => /^value:(.*)$/.exec(id)?.[1]).filter((value): value is string => value !== undefined).map(decodeURIComponent);
             if (values.length === 0) return [];
             const database = new DatabaseSync(databasePath, { readOnly: true });
             try {
                 const marks = values.map(() => "?").join(",");
-                return (database.prepare(`SELECT DISTINCT r.viewer_object_id FROM elements e JOIN render_objects r ON r.source_element_id=e.source_element_id WHERE e.${facet} IN (${marks})`).all(...values) as Array<{ viewer_object_id: string }>).map((row) => row.viewer_object_id);
+                return (database.prepare(`SELECT DISTINCT r.viewer_object_id FROM elements e JOIN render_objects r ON r.source_element_id=e.source_element_id WHERE e.${column} IN (${marks})`).all(...values) as Array<{ viewer_object_id: string }>).map((row) => row.viewer_object_id);
             } finally { database.close(); }
         }
         const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
