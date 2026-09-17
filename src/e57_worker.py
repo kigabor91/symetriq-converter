@@ -18,6 +18,8 @@ import pye57
 LAS_HEADER_SIZE = 227
 POINT_RECORD_LENGTH = 26  # LAS 1.2 point format 2: XYZ, intensity, flags, RGB
 SCALE = 0.001
+INT32_MIN = -(2**31)
+INT32_MAX = 2**31 - 1
 # Keep this switch rather than deleting the implementation. Balanced creates
 # the largest derived file and is too GPU-intensive for the current MVP viewer.
 GENERATE_BALANCED_LOD = False
@@ -30,7 +32,7 @@ def read_optional(node, name, default=None):
     return node[name].value() if node.isDefined(name) else default
 
 
-def write_las_header(handle, point_count: int) -> None:
+def write_las_header(handle, point_count: int, offsets: np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0)) -> None:
     header = bytearray(LAS_HEADER_SIZE)
     header[0:4] = b"LASF"
     header[24] = 1
@@ -48,7 +50,7 @@ def write_las_header(handle, point_count: int) -> None:
     struct.pack_into("<I", header, 107, point_count)
     struct.pack_into("<5I", header, 111, point_count, 0, 0, 0, 0)
     struct.pack_into("<3d", header, 131, SCALE, SCALE, SCALE)
-    struct.pack_into("<3d", header, 155, 0.0, 0.0, 0.0)
+    struct.pack_into("<3d", header, 155, *(float(value) for value in offsets))
     handle.write(header)
 
 
@@ -73,6 +75,9 @@ def finalize_las(handle, point_count: int, minimum: np.ndarray, maximum: np.ndar
     handle.seek(107)
     handle.write(struct.pack("<I", point_count))
     handle.write(struct.pack("<5I", point_count, 0, 0, 0, 0))
+    if point_count == 0:
+        minimum = np.zeros(3, dtype=np.float64)
+        maximum = np.zeros(3, dtype=np.float64)
     write_las_bounds(handle, minimum, maximum)
 
 
@@ -90,10 +95,67 @@ def spatial_sample(px: float, py: float, pz: float, divisor: int) -> bool:
     return (hashed & 0x7FFFFFFF) % divisor == 0
 
 
-def pack_las_point(px, py, pz, pr, pg, pb) -> bytes:
+def choose_las_offsets(minimum: np.ndarray, maximum: np.ndarray) -> np.ndarray:
+    """Selects LAS offsets without changing the source coordinate precision.
+
+    Local clouds keep the historical zero offsets when their millimetre integer
+    coordinates fit in int32. Larger clouds use the midpoint of each axis
+    bounds, which maximises the available signed-int32 range. The LAS header
+    stores these offsets, so decoding reconstructs the original local/world
+    coordinates rather than a silently shifted cloud.
+    """
+    minimum = np.asarray(minimum, dtype=np.float64)
+    maximum = np.asarray(maximum, dtype=np.float64)
+    if minimum.shape != (3,) or maximum.shape != (3,) or not np.all(np.isfinite(minimum)) or not np.all(np.isfinite(maximum)):
+        raise ValueError(f"Cannot select LAS offsets from non-finite bounds: minimum={minimum.tolist()} maximum={maximum.tolist()}")
+    if np.any(maximum < minimum):
+        raise ValueError(f"Cannot select LAS offsets from inverted bounds: minimum={minimum.tolist()} maximum={maximum.tolist()}")
+
+    offsets = np.zeros(3, dtype=np.float64)
+    representable_extent = (INT32_MAX - INT32_MIN) * SCALE
+    for axis in range(3):
+        minimum_value = float(minimum[axis])
+        maximum_value = float(maximum[axis])
+        if maximum_value - minimum_value > representable_extent:
+            axis_name = "XYZ"[axis]
+            raise ValueError(
+                f"LAS coordinate range exceeds int32 at axis={axis_name}: "
+                f"minimum={minimum_value!r} maximum={maximum_value!r} "
+                f"extent={maximum_value - minimum_value!r} scale={SCALE!r}",
+            )
+        zero_minimum = round(minimum_value / SCALE)
+        zero_maximum = round(maximum_value / SCALE)
+        if INT32_MIN <= zero_minimum <= INT32_MAX and INT32_MIN <= zero_maximum <= INT32_MAX:
+            continue
+        offsets[axis] = (minimum_value + maximum_value) / 2.0
+    return offsets
+
+
+def encode_las_coordinate(value: float, axis: int, offset: float, scan_index: int | None = None, point_index: int | None = None) -> int:
+    """Encodes one coordinate and raises a diagnostic error before struct.pack."""
+    source_coordinate = float(value)
+    encoded = round((source_coordinate - float(offset)) / SCALE)
+    if encoded < INT32_MIN or encoded > INT32_MAX:
+        axis_name = "XYZ"[axis]
+        raise ValueError(
+            f"LAS int32 overflow axis={axis_name} source_coordinate={source_coordinate!r} "
+            f"scale={SCALE!r} offset={float(offset)!r} encoded_integer={encoded!r} "
+            f"scan_index={scan_index!r} point_index={point_index!r}",
+        )
+    return int(encoded)
+
+
+def pack_las_point(
+    px, py, pz, pr, pg, pb,
+    offsets: np.ndarray | tuple[float, float, float] = (0.0, 0.0, 0.0),
+    scan_index: int | None = None,
+    point_index: int | None = None,
+) -> bytes:
     return struct.pack(
         "<iiiHBBbBHHHH",
-        round(float(px) / SCALE), round(float(py) / SCALE), round(float(pz) / SCALE),
+        encode_las_coordinate(px, 0, float(offsets[0]), scan_index, point_index),
+        encode_las_coordinate(py, 1, float(offsets[1]), scan_index, point_index),
+        encode_las_coordinate(pz, 2, float(offsets[2]), scan_index, point_index),
         0, 0, 0, 0, 0, 0, int(pr) * 257, int(pg) * 257, int(pb) * 257,
     )
 
@@ -114,6 +176,28 @@ def main() -> None:
     with pye57.E57(args.input) as e57:
         headers = [e57.get_header(index) for index in range(e57.scan_count)]
         point_count = sum(header.point_count for header in headers)
+        # read_scan(transform=True) applies the E57 scan pose. The explicit
+        # scene origin is then removed, leaving the same local coordinate space
+        # used by the Viewer and panorama stations. Bounds must be known before
+        # writing any record so the LAS header offset is consistent for every
+        # LOD; therefore the point arrays are streamed once for bounds and once
+        # for output, without retaining the cloud in memory.
+        origin = np.asarray(origin, dtype=np.float64)
+        cloud_minimum = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+        cloud_maximum = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+        for scan_index in range(e57.scan_count):
+            if headers[scan_index].point_count <= 0:
+                continue
+            scan = e57.read_scan(scan_index, transform=True, ignore_missing_fields=True)
+            coordinates = np.column_stack((scan["cartesianX"], scan["cartesianY"], scan["cartesianZ"])) - origin
+            if len(coordinates) == 0:
+                continue
+            cloud_minimum = np.minimum(cloud_minimum, np.min(coordinates, axis=0))
+            cloud_maximum = np.maximum(cloud_maximum, np.max(coordinates, axis=0))
+        if not np.all(np.isfinite(cloud_minimum)):
+            cloud_minimum = np.zeros(3, dtype=np.float64)
+            cloud_maximum = np.zeros(3, dtype=np.float64)
+        las_offsets = choose_las_offsets(cloud_minimum, cloud_maximum)
         output_paths = {
             "fast": output / f"{args.file_id}.fast.las",
             "very_fast": output / f"{args.file_id}.very-fast.las",
@@ -125,7 +209,7 @@ def main() -> None:
         with ExitStack() as stack:
             writers = {name: stack.enter_context(path.open("wb")) for name, path in output_paths.items()}
             for writer in writers.values():
-                write_las_header(writer, 0)
+                write_las_header(writer, 0, las_offsets)
             counts = {name: 0 for name in writers}
             converted_point_count = 0
             minimums = {name: np.array([np.inf, np.inf, np.inf]) for name in writers}
@@ -144,10 +228,10 @@ def main() -> None:
                 red = scan.get("colorRed", np.zeros(len(x), dtype=np.uint8))
                 green = scan.get("colorGreen", np.zeros(len(x), dtype=np.uint8))
                 blue = scan.get("colorBlue", np.zeros(len(x), dtype=np.uint8))
-                for values in zip(x, y, z, red, green, blue):
+                for point_index, values in enumerate(zip(x, y, z, red, green, blue)):
                     px, py, pz, pr, pg, pb = values
                     point = np.array([float(px), float(py), float(pz)])
-                    record = pack_las_point(px, py, pz, pr, pg, pb)
+                    record = pack_las_point(px, py, pz, pr, pg, pb, las_offsets, scan_index, point_index)
                     converted_point_count += 1
                     if GENERATE_BALANCED_LOD and spatial_sample(
                         float(px), float(py), float(pz), BALANCED_POINT_DIVISOR,
