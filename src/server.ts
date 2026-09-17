@@ -10,6 +10,15 @@ import { createPublishRouter } from "./publish/publishRoutes.js";
 import { CanonicalPropertyStore } from "./publish/canonicalPropertyStore.js";
 import { queryCanonicalMetadataProperty } from "./publish/canonicalMetadataQuery.js";
 import {
+    cleanupUploadFiles,
+    LARGE_UPLOAD_REQUEST_TIMEOUT_MS,
+    parseContentLength,
+    UPLOAD_FILE_SIZE_LIMIT_BYTES,
+    UPLOAD_PROGRESS_INTERVAL_MS,
+    uploadPercent,
+    type UploadDiagnosticsContext,
+} from "./uploadDiagnostics.js";
+import {
     getDataDirectory,
     getProjectDirectory,
     readProjects,
@@ -27,13 +36,142 @@ const app = express();
 const temporaryUploadDirectory = path.join(getDataDirectory(), "upload-temp");
 fs.mkdirSync(temporaryUploadDirectory, { recursive: true });
 
+const uploadDiagnostics = new WeakMap<object, UploadDiagnosticsContext>();
+
+const uploadStorage = multer.diskStorage({
+    destination: temporaryUploadDirectory,
+    filename: (request, file, callback) => {
+        const filename = `${randomUUID()}${path.extname(file.originalname).toLowerCase() || ".upload"}`;
+        const context = uploadDiagnostics.get(request);
+        context?.tempPaths.push(path.join(temporaryUploadDirectory, filename));
+        callback(null, filename);
+    },
+});
+
 const upload = multer({
-    dest: temporaryUploadDirectory,
+    storage: uploadStorage,
     // Structured E57 exports can be several gigabytes. Keep a protective
     // per-file ceiling, while allowing the large reality-capture uploads
     // that this service is designed to process.
-    limits: { files: 20, fileSize: 20 * 1024 * 1024 * 1024 },
+    limits: { files: 20, fileSize: UPLOAD_FILE_SIZE_LIMIT_BYTES },
 });
+
+function temporaryUploadBytes(context: UploadDiagnosticsContext): number | undefined {
+    const sizes = context.tempPaths.map((filePath) => {
+        try {
+            return fs.statSync(filePath).size;
+        } catch {
+            return 0;
+        }
+    });
+    return context.tempPaths.length > 0 ? sizes.reduce((sum, size) => sum + size, 0) : undefined;
+}
+
+function temporaryUploadFreeBytes(): number | undefined {
+    try {
+        const stats = fs.statfsSync(temporaryUploadDirectory);
+        return stats.bavail * stats.bsize;
+    } catch {
+        return undefined;
+    }
+}
+
+function logUploadProgress(context: UploadDiagnosticsContext, label: string): void {
+    const elapsedMs = Math.max(1, Date.now() - context.startedAt);
+    const throughput = context.receivedBytes / (elapsedMs / 1000);
+    const fileBytes = temporaryUploadBytes(context);
+    const percent = uploadPercent(context.receivedBytes, context.contentLength);
+    console.info(
+        `[Upload ${label}] requestId=${context.requestId}`
+        + ` route=${context.route}`
+        + ` expectedBytes=${context.contentLength ?? "unknown"}`
+        + ` receivedBytes=${context.receivedBytes}`
+        + ` tempFileBytes=${fileBytes ?? "unknown"}`
+        + ` freeDiskBytes=${temporaryUploadFreeBytes() ?? "unknown"}`
+        + ` percent=${percent === undefined ? "unknown" : percent.toFixed(1)}`
+        + ` elapsedMs=${elapsedMs}`
+        + ` throughputMBps=${(throughput / (1024 * 1024)).toFixed(3)}`
+        + ` requestTimeoutMs=${LARGE_UPLOAD_REQUEST_TIMEOUT_MS}`
+        + ` fileSizeLimitBytes=${UPLOAD_FILE_SIZE_LIMIT_BYTES}`
+        + ` tempFile=${context.tempPaths.join(",") || "unknown"}`,
+    );
+}
+
+function cleanupFailedUpload(context: UploadDiagnosticsContext): void {
+    const result = cleanupUploadFiles(context.tempPaths);
+    if (result.failed.length > 0) {
+        console.error(`[Upload cleanup] requestId=${context.requestId} failed=${JSON.stringify(result.failed)}`);
+    } else if (result.removed.length > 0) {
+        console.info(`[Upload cleanup] requestId=${context.requestId} removed=${result.removed.join(",")}`);
+    }
+}
+
+/** Observes the raw request without buffering it; Multer still streams to disk. */
+function trackUpload(request: express.Request, response: express.Response, next: express.NextFunction): void {
+    const contentLength = parseContentLength(request.headers["content-length"]);
+    const context: UploadDiagnosticsContext = {
+        requestId: String(request.header("x-request-id") ?? randomUUID()),
+        route: request.originalUrl,
+        startedAt: Date.now(),
+        tempPaths: [],
+        receivedBytes: 0,
+        clientAborted: false,
+        requestComplete: false,
+        uploadCompleted: false,
+        ...(contentLength === undefined ? {} : { contentLength }),
+    };
+    uploadDiagnostics.set(request, context);
+    response.setHeader("X-Request-ID", context.requestId);
+    console.info(
+        `[Upload START] requestId=${context.requestId}`
+        + ` route=${context.route}`
+        + ` remote=${request.socket.remoteAddress ?? "unknown"}`
+        + ` contentLength=${context.contentLength ?? "unknown"}`
+        + ` requestTimeoutMs=${LARGE_UPLOAD_REQUEST_TIMEOUT_MS}`
+        + ` fileSizeLimitBytes=${UPLOAD_FILE_SIZE_LIMIT_BYTES}`,
+    );
+
+    request.on("data", (chunk: Buffer | string) => {
+        context.receivedBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+    });
+    request.on("aborted", () => {
+        context.clientAborted = true;
+        console.error(`[Upload ABORTED] requestId=${context.requestId}`);
+    });
+    request.on("close", () => {
+        context.requestComplete = request.complete;
+        if (!request.complete) {
+            context.clientAborted = true;
+            console.error(`[Upload CLOSE before complete] requestId=${context.requestId}`);
+        }
+    });
+    request.on("error", (error) => {
+        console.error(`[Upload request error] requestId=${context.requestId}`, error);
+    });
+    request.socket.on("timeout", () => {
+        console.error(`[Upload socket timeout] requestId=${context.requestId}`);
+    });
+    response.on("finish", () => {
+        logUploadProgress(context, context.uploadCompleted ? "COMPLETE" : "RESPONSE");
+        if (context.progressTimer) clearInterval(context.progressTimer);
+    });
+    response.on("close", () => {
+        if (!context.uploadCompleted && !response.writableFinished) {
+            console.error(`[Upload response close before finish] requestId=${context.requestId}`);
+        }
+        if (context.progressTimer) clearInterval(context.progressTimer);
+    });
+    context.progressTimer = setInterval(() => logUploadProgress(context, "PROGRESS"), UPLOAD_PROGRESS_INTERVAL_MS);
+    context.progressTimer.unref();
+    next();
+}
+
+function markUploadCompleted(request: express.Request): void {
+    const context = uploadDiagnostics.get(request);
+    if (!context) return;
+    context.uploadCompleted = true;
+    logUploadProgress(context, "FILES WRITTEN");
+}
 
 const supportedFileExtensions = new Set([".ifc", ".las", ".laz", ".e57"]);
 
@@ -1031,6 +1169,7 @@ function queueIfcConversion(
 
 app.post(
     "/api/projects/:projectId/files",
+    trackUpload,
     upload.array("files", 20),
     (request, response) => {
         const projectId = String(request.params.projectId ?? "");
@@ -1109,6 +1248,7 @@ app.post(
                 queueE57Conversion(projectId, record.id, inputPath, record.revision ?? 1);
             });
 
+        markUploadCompleted(request);
         response.status(202).json(
             readProjects().find(({ id }) => id === projectId),
         );
@@ -1211,6 +1351,7 @@ app.delete("/api/projects/:projectId/files/:fileId", (request, response) => {
 
 app.post(
     "/api/projects/:projectId/files/:fileId/replace",
+    trackUpload,
     upload.single("file"),
     (request, response) => {
         const projectId = String(request.params.projectId ?? "");
@@ -1301,11 +1442,34 @@ app.post(
         } else if (replacementIsE57) {
             queueE57Conversion(projectId, fileId, inputPath, revision);
         }
+        markUploadCompleted(request);
         response.status(202).json(readProjects().find(({ id }) => id === projectId));
     },
 );
 
-app.use((error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
+app.use((error: unknown, request: express.Request, response: express.Response, next: express.NextFunction) => {
+    const context = uploadDiagnostics.get(request);
+    if (context && !context.uploadCompleted) {
+        const elapsedMs = Math.max(1, Date.now() - context.startedAt);
+        const fileBytes = temporaryUploadBytes(context);
+        const percent = uploadPercent(context.receivedBytes, context.contentLength);
+        console.error(
+            `[Upload FAILURE] requestId=${context.requestId}`
+            + ` expectedBytes=${context.contentLength ?? "unknown"}`
+            + ` receivedBytes=${context.receivedBytes}`
+            + ` tempFileBytes=${fileBytes ?? "unknown"}`
+            + ` freeDiskBytes=${temporaryUploadFreeBytes() ?? "unknown"}`
+            + ` percent=${percent === undefined ? "unknown" : percent.toFixed(1)}`
+            + ` elapsedMs=${elapsedMs}`
+            + ` clientAborted=${context.clientAborted}`
+            + ` requestComplete=${context.requestComplete}`
+            + ` requestTimeoutMs=${LARGE_UPLOAD_REQUEST_TIMEOUT_MS}`
+            + ` fileSizeLimitBytes=${UPLOAD_FILE_SIZE_LIMIT_BYTES}`
+            + ` tempFile=${context.tempPaths.join(",") || "unknown"}`,
+            error,
+        );
+        cleanupFailedUpload(context);
+    }
     if (response.headersSent) {
         next(error);
         return;
@@ -1323,6 +1487,18 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     response.status(500).json({ error: "The upload or conversion request failed. Check the converter server log for details." });
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
     console.log(`SymetrIQ project server listening on http://localhost:${port}`);
+});
+
+// Node's default requestTimeout is 5 minutes, which is not sufficient for a
+// multi-gigabyte E57 upload over a production VPN. Keep a finite, explicit
+// budget instead of disabling request timeouts globally. IIS/ARR has its own
+// independent proxy timeout and is reported separately in deployment docs.
+server.requestTimeout = LARGE_UPLOAD_REQUEST_TIMEOUT_MS;
+server.headersTimeout = 60 * 1000;
+server.keepAliveTimeout = 5 * 1000;
+server.timeout = 0;
+server.on("timeout", (socket) => {
+    console.error(`[HTTP server socket timeout] remote=${socket.remoteAddress ?? "unknown"}`);
 });
