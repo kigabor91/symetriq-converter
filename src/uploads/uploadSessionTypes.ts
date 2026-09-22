@@ -24,6 +24,14 @@ export interface UploadPartRecord {
     completedAt: string;
 }
 
+export type UploadIntegrationStage = "adopting" | "registered" | "dispatched";
+
+export interface UploadIntegrationError {
+    stage: "adopt" | "register" | "dispatch";
+    message: string;
+    retryable: boolean;
+}
+
 /**
  * Durable internal upload-session representation. The API derives
  * uploadedParts from parts so part identity is stored only once.
@@ -58,6 +66,12 @@ export interface UploadSessionRecord {
     expiresAt: string;
     cancelRequested?: boolean;
     finalAsset?: { projectId: string; fileId: string; revision: number };
+    /** Durable downstream handoff state. Transport `complete` never means conversion complete. */
+    integrationStage?: UploadIntegrationStage;
+    projectFileId?: string;
+    registeredAt?: string;
+    processingStartedAt?: string;
+    integrationError?: UploadIntegrationError;
     error?: { code: string; message: string; retryable: boolean };
 }
 
@@ -81,6 +95,10 @@ export interface UploadSessionResponse {
     finalizedAt?: string;
     finalizedArtifactName?: string;
     finalAsset?: { projectId: string; fileId: string; revision: number };
+    projectFileId?: string;
+    registeredAt?: string;
+    processingStartedAt?: string;
+    integrationError?: UploadIntegrationError;
     error?: { code: string; message: string; retryable: boolean };
 }
 
@@ -105,6 +123,10 @@ export function toUploadSessionResponse(session: UploadSessionRecord): UploadSes
         ...(session.finalizedAt ? { finalizedAt: session.finalizedAt } : {}),
         ...(session.finalizedArtifactName ? { finalizedArtifactName: session.finalizedArtifactName } : {}),
         ...(session.finalAsset ? { finalAsset: session.finalAsset } : {}),
+        ...(session.projectFileId ? { projectFileId: session.projectFileId } : {}),
+        ...(session.registeredAt ? { registeredAt: session.registeredAt } : {}),
+        ...(session.processingStartedAt ? { processingStartedAt: session.processingStartedAt } : {}),
+        ...(session.integrationError ? { integrationError: session.integrationError } : {}),
         ...(session.error ? { error: session.error } : {}),
     };
 }

@@ -5,6 +5,8 @@ import {
     UPLOAD_SESSION_VERSION,
     uploadFileKinds,
     uploadSessionStatuses,
+    type UploadIntegrationError,
+    type UploadIntegrationStage,
     type UploadPartRecord,
     type UploadSessionRecord,
 } from "./uploadSessionTypes.js";
@@ -18,6 +20,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function validTimestamp(value: unknown): value is string {
     return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function validIntegrationStage(value: unknown): value is UploadIntegrationStage {
+    return value === "adopting" || value === "registered" || value === "dispatched";
+}
+
+function validIntegrationError(value: unknown): value is UploadIntegrationError {
+    return isRecord(value)
+        && (value.stage === "adopt" || value.stage === "register" || value.stage === "dispatch")
+        && typeof value.message === "string"
+        && typeof value.retryable === "boolean";
 }
 
 function parseParts(value: unknown, totalParts: number, totalBytes: number, chunkSize: number): UploadPartRecord[] {
@@ -98,6 +111,20 @@ export function parseUploadSessionRecord(value: unknown, expectedUploadId?: stri
     }
     if (value.idempotencyKey !== undefined && typeof value.idempotencyKey !== "string") {
         throw new Error("Upload session idempotency key is invalid.");
+    }
+    if (value.integrationStage !== undefined && !validIntegrationStage(value.integrationStage)) {
+        throw new Error("Upload session integration stage is invalid.");
+    }
+    if (value.projectFileId !== undefined && (typeof value.projectFileId !== "string" || !uploadIdPattern.test(value.projectFileId))) {
+        throw new Error("Upload session project file ID is invalid.");
+    }
+    for (const timestampField of ["registeredAt", "processingStartedAt"] as const) {
+        if (value[timestampField] !== undefined && !validTimestamp(value[timestampField])) {
+            throw new Error(`Upload session ${timestampField} is invalid.`);
+        }
+    }
+    if (value.integrationError !== undefined && !validIntegrationError(value.integrationError)) {
+        throw new Error("Upload session integration error is invalid.");
     }
     for (const timestampField of ["finalizationStartedAt", "finalizationUpdatedAt", "finalizedAt"] as const) {
         if (value[timestampField] !== undefined && !validTimestamp(value[timestampField])) {
@@ -198,6 +225,20 @@ export class UploadSessionRepository {
         return result;
     }
 
+    listCompletedUploadIds(): string[] {
+        if (!fs.existsSync(this.rootDirectory)) return [];
+        const result: string[] = [];
+        for (const entry of fs.readdirSync(this.rootDirectory, { withFileTypes: true })) {
+            if (!entry.isDirectory() || !uploadIdPattern.test(entry.name)) continue;
+            try {
+                if (this.get(entry.name)?.status === "complete") result.push(entry.name);
+            } catch {
+                // Corrupt manifests remain visible to normal diagnostics; discovery must not block startup.
+            }
+        }
+        return result;
+    }
+
     create(session: UploadSessionRecord): void {
         const sessionDirectory = this.getSessionDirectory(session.uploadId);
         fs.mkdirSync(this.rootDirectory, { recursive: true });
@@ -259,6 +300,10 @@ export class UploadSessionRepository {
 
     assertFinalizedArtifactStorage(session: UploadSessionRecord): void {
         if (session.status !== "complete") return;
+        // Once a completed source has been atomically adopted as a canonical
+        // project upload, the staging artifact is intentionally gone. The
+        // ProjectFileRecord is then the durable owner of the source file.
+        if (session.projectFileId || session.integrationStage === "adopting") return;
         const expectedName = this.getFinalizedArtifactName(session);
         if (session.finalizedArtifactName !== expectedName) {
             throw new Error("Completed upload artifact name does not match its reserved identity.");

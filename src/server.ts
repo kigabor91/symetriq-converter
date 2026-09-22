@@ -10,6 +10,7 @@ import { createPublishRouter } from "./publish/publishRoutes.js";
 import { CanonicalPropertyStore } from "./publish/canonicalPropertyStore.js";
 import { queryCanonicalMetadataProperty } from "./publish/canonicalMetadataQuery.js";
 import { UploadSessionRepository } from "./uploads/uploadSessionRepository.js";
+import { ProjectFileIntegrationService } from "./uploads/projectFileIntegration.js";
 import { createUploadSessionRouter } from "./uploads/uploadSessionRoutes.js";
 import { UploadSessionService } from "./uploads/uploadSessionService.js";
 import {
@@ -41,9 +42,13 @@ fs.mkdirSync(temporaryUploadDirectory, { recursive: true });
 const uploadSessionRepository = new UploadSessionRepository(
     path.join(getDataDirectory(), "upload-sessions"),
 );
+let resumableProjectFileIntegration: ProjectFileIntegrationService | undefined;
 const uploadSessionService = new UploadSessionService(
     uploadSessionRepository,
     (projectId) => readProjects().some(({ id }) => id === projectId),
+    {
+        onTransportFinalized: (session) => resumableProjectFileIntegration?.ensure(session.uploadId),
+    },
 );
 
 const uploadDiagnostics = new WeakMap<object, UploadDiagnosticsContext>();
@@ -1178,6 +1183,86 @@ function queueIfcConversion(
         });
 }
 
+function createCanonicalProjectFileRecord(
+    project: ProjectRecord,
+    fileId: string,
+    originalName: string,
+    extension: string,
+): ProjectFileRecord {
+    const isIfc = extension === ".ifc";
+    const isE57 = extension === ".e57";
+    const kind: ProjectFileRecord["kind"] = isIfc
+        ? "ifc"
+        : isE57
+            ? "structured-e57"
+            : "point-cloud";
+    const record: ProjectFileRecord = {
+        id: fileId,
+        revision: 1,
+        originalName,
+        kind,
+        status: isIfc || isE57 ? "queued" : "ready",
+        ...(!isIfc && !isE57 && {
+            pointCloud: buildPointCloudPackage(
+                project.id,
+                fileId,
+                extension as ".las" | ".laz",
+                1,
+                Boolean(project.sceneOrigin),
+            ),
+        }),
+    };
+    if (!isIfc && !isE57 && project.sceneOrigin) {
+        createLocallyRebasedPointCloud(
+            project.id,
+            fileId,
+            extension as ".las" | ".laz",
+            project.sceneOrigin,
+        );
+    }
+    return record;
+}
+
+/**
+ * The one existing processing dispatcher for both legacy multipart and
+ * resumable project files. Source bytes have already reached canonical project
+ * storage when this is called, so transport never influences processor choice.
+ */
+function dispatchProjectFileProcessing(
+    projectId: string,
+    file: ProjectFileRecord,
+    inputPath: string,
+): boolean {
+    if (file.kind !== "ifc" && file.kind !== "structured-e57") return false;
+    const revision = file.revision ?? 1;
+    const key = conversionKey(projectId, file.id);
+    const stored = readProjects()
+        .find((project) => project.id === projectId)
+        ?.files.find((candidate) => candidate.id === file.id);
+    if (!stored || stored.status !== "queued" || conversionControllers.has(key)) return false;
+    if (file.kind === "ifc") {
+        queueIfcConversion(projectId, file.id, inputPath, revision);
+    } else {
+        queueE57Conversion(projectId, file.id, inputPath, revision);
+    }
+    return true;
+}
+
+resumableProjectFileIntegration = new ProjectFileIntegrationService({
+    repository: uploadSessionRepository,
+    getProject: (projectId) => readProjects().find((project) => project.id === projectId),
+    updateProject,
+    getProjectDirectory,
+    createProjectFileRecord: (project, session) => createCanonicalProjectFileRecord(
+        project,
+        session.reservedFileId,
+        session.filename,
+        session.normalizedExtension,
+    ),
+    dispatchProjectFileProcessing,
+});
+resumableProjectFileIntegration.recoverCompleted();
+
 app.post(
     "/api/projects/:projectId/files",
     trackUpload,
@@ -1211,32 +1296,12 @@ app.post(
             fs.mkdirSync(uploadsDirectory, { recursive: true });
             const inputPath = path.join(uploadsDirectory, `${fileId}${extension}`);
             fs.renameSync(uploadedFile.path, inputPath);
-            const isIfc = extension === ".ifc";
-            const isE57 = extension === ".e57";
-            const record: ProjectFileRecord = {
-                id: fileId,
-                revision: 1,
-                originalName: uploadedFile.originalname,
-                kind: isIfc ? "ifc" : isE57 ? "structured-e57" : "point-cloud",
-                status: isIfc || isE57 ? "queued" : "ready",
-                ...(!isIfc && !isE57 && {
-                    pointCloud: buildPointCloudPackage(
-                        projectId,
-                        fileId,
-                        extension as ".las" | ".laz",
-                        1,
-                        Boolean(project.sceneOrigin),
-                    ),
-                }),
-            };
-            if (!isIfc && !isE57 && project.sceneOrigin) {
-                createLocallyRebasedPointCloud(
-                    projectId,
-                    fileId,
-                    extension as ".las" | ".laz",
-                    project.sceneOrigin,
-                );
-            }
+            const record = createCanonicalProjectFileRecord(
+                project,
+                fileId,
+                uploadedFile.originalname,
+                extension,
+            );
             acceptedFiles.push({ record, inputPath });
         }
 
@@ -1248,16 +1313,9 @@ app.post(
         updateProject(projectId, (storedProject) => {
             storedProject.files.push(...acceptedFiles.map(({ record }) => record));
         });
-        acceptedFiles
-            .filter(({ record }) => record.kind === "ifc")
-            .forEach(({ record, inputPath }) => {
-                queueIfcConversion(projectId, record.id, inputPath, record.revision ?? 1);
-            });
-        acceptedFiles
-            .filter(({ record }) => record.kind === "structured-e57")
-            .forEach(({ record, inputPath }) => {
-                queueE57Conversion(projectId, record.id, inputPath, record.revision ?? 1);
-            });
+        acceptedFiles.forEach(({ record, inputPath }) => {
+            dispatchProjectFileProcessing(projectId, record, inputPath);
+        });
 
         markUploadCompleted(request);
         response.status(202).json(

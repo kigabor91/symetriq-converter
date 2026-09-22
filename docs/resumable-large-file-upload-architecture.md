@@ -2,7 +2,7 @@
 
 **Repository:** `symetriq-converter`  
 **Sprint type:** architecture, contract and benchmark design only  
-**Status:** **PASS – implementation intentionally deferred**
+**Status:** **R2B.5 implemented – resumable transport now converges into the canonical project-file pipeline**
 
 ## 1. Executive decision
 
@@ -999,5 +999,61 @@ R2B.3 activates asynchronous and restart-recoverable finalization:
 - Completed manifests expose only `finalBytes`, `finalSha256`, `finalizedAt`
   and the safe artifact basename. Absolute server paths are never public.
 
-Part cleanup, expiration scheduling, permanent project-file registration and
-E57/IFC processing remain deferred to R2B.5/R2B.6.
+Part cleanup and expiration scheduling remain deferred to R2B.6.
+
+## 29. R2B.5 project-file and processing integration
+
+R2B.5 makes the resumable transport disappear after its bytes have been safely
+finalized. The one convergence point is the existing `ProjectFileRecord` plus
+the existing source-neutral processing dispatcher in `src/server.ts`.
+
+```text
+resumable final artifact
+  → atomic rename to data/projects/<projectId>/uploads/<reservedFileId>.<ext>
+  → one ProjectFileRecord using reservedFileId
+  → existing dispatcher
+     → queueE57Conversion() for structured E57
+     → queueIfcConversion() for IFC
+     → ready point-cloud package for LAS/LAZ
+```
+
+Implementation ownership:
+
+- `src/uploads/projectFileIntegration.ts` owns only the transport-to-project
+  handoff. It never invokes an E57 or IFC converter directly.
+- `createCanonicalProjectFileRecord()` and
+  `dispatchProjectFileProcessing()` are shared with the legacy multipart
+  project-file route. Processing remains selected only from the canonical
+  `ProjectFileRecord.kind`.
+- The session's `reservedFileId` is the permanent project file ID. Repeated
+  integration finds that ID in `projects.json`, so it cannot append a second
+  file record.
+
+### Crash-safe handoff
+
+Before the atomic move, the session persists `integrationStage: "adopting"`.
+If a process stops after the move but before the project JSON write, recovery
+recognizes the pre-existing canonical path, streams it once to compare its
+trusted final SHA-256, then creates the same reserved-ID record. Normal moves
+do not rehash or copy the multi-gigabyte source.
+
+After registration, the session stores `projectFileId`, `registeredAt`, a safe
+`finalAsset` reference and, when applicable, `processingStartedAt`. These are
+separate from `status: complete`, which always means only **transport bytes
+finalized**. Conversion can later become `ready` or `error` on the canonical
+project file without invalidating the uploaded source.
+
+Completed upload sessions are reconciled at server startup and on later GET or
+complete calls. The in-process conversion-controller guard prevents duplicate
+dispatch inside a running server; a queued durable project file may safely be
+dispatched again after a process restart.
+
+### Storage ownership
+
+- `data/projects/<projectId>/uploads/<fileId>.<ext>` is the permanent original
+  source.
+- The staging artifact is atomically moved, not copied, so no third full-size
+  source copy is introduced.
+- immutable session parts and `session.json` remain temporarily for R2B.6
+  retention/cleanup and reconciliation. They are not deleted before project
+  registration is durable.

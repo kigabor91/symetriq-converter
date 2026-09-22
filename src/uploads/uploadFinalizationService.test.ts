@@ -99,6 +99,19 @@ test("streams all parts into one byte-identical finalized artifact with a partia
     assert.equal(fs.readdirSync(repository.getPartsDirectory(session.uploadId)).length, 3);
 });
 
+test("notifies the integration boundary after transport finalization without delaying the complete API", async () => {
+    const notified: string[] = [];
+    const { service } = fixture({
+        onTransportFinalized: (session) => { notified.push(session.uploadId); },
+    });
+    const bytes = Buffer.from("integration-ready");
+    const session = createSession(service, bytes, "structured-e57");
+    await uploadAll(service, session, bytes);
+    await finalize(service, session.uploadId);
+
+    assert.deepEqual(notified, [session.uploadId]);
+});
+
 test("rejects completion while a required part is missing", async () => {
     const { service } = fixture();
     const bytes = Buffer.from("abcdefgh");

@@ -76,6 +76,8 @@ export interface UploadSessionServiceOptions {
     logger?: UploadSessionLogger;
     getFreeDiskBytes?: (directory: string) => number;
     finalizationFaultInjector?: (stage: "before-assembly" | "during-assembly" | "before-promotion", processedBytes: number) => void;
+    /** Invoked asynchronously after transport bytes become durably complete. */
+    onTransportFinalized?: (session: UploadSessionRecord) => void | Promise<void>;
 }
 
 export interface UploadSessionLogger {
@@ -311,6 +313,7 @@ export class UploadSessionService {
     private readonly logger: UploadSessionLogger;
     private readonly getFreeDiskBytes: (directory: string) => number;
     private readonly finalizationFaultInjector?: UploadSessionServiceOptions["finalizationFaultInjector"];
+    private readonly onTransportFinalized?: UploadSessionServiceOptions["onTransportFinalized"];
     private readonly sessionLockTails = new Map<string, Promise<void>>();
     private readonly finalizationTasks = new Map<string, Promise<void>>();
 
@@ -330,6 +333,7 @@ export class UploadSessionService {
             return statistics.bavail * statistics.bsize;
         });
         this.finalizationFaultInjector = options.finalizationFaultInjector;
+        this.onTransportFinalized = options.onTransportFinalized;
         if (!Number.isSafeInteger(this.chunkSize) || this.chunkSize <= 0
             || !Number.isSafeInteger(this.maxUploadBytes) || this.maxUploadBytes <= 0
             || !Number.isSafeInteger(this.expiryMs) || this.expiryMs <= 0) {
@@ -453,6 +457,7 @@ export class UploadSessionService {
     getSessionStatus(uploadId: string): UploadSessionRecord {
         const session = this.getSession(uploadId);
         if (session.status === "finalizing") this.ensureFinalizationTask(uploadId, true);
+        if (session.status === "complete") this.notifyTransportFinalized(session);
         return session;
     }
 
@@ -466,6 +471,7 @@ export class UploadSessionService {
                 + ` totalBytes=${session.totalBytes} totalParts=${session.totalParts} status=${session.status}`,
             );
             if (session.status === "complete") {
+                this.notifyTransportFinalized(session);
                 result = { session, alreadyComplete: true };
                 return;
             }
@@ -776,6 +782,8 @@ export class UploadSessionService {
                 );
             }
             await this.persistCompleted(session, processedBytes, finalSha256);
+            const completed = this.repository.get(uploadId);
+            if (completed?.status === "complete") this.notifyTransportFinalized(completed);
             const elapsedMs = Date.now() - startedAt;
             this.logger.info(
                 `[Upload finalize complete] uploadId=${uploadId} finalBytes=${processedBytes}`
@@ -791,6 +799,16 @@ export class UploadSessionService {
                 + ` stage=${stage} processedBytes=${processedBytes} error=${normalized.message}`,
             );
         }
+    }
+
+    private notifyTransportFinalized(session: UploadSessionRecord): void {
+        if (!this.onTransportFinalized) return;
+        void Promise.resolve(this.onTransportFinalized(session)).catch((error) => {
+            this.logger.error(
+                `[Upload finalized integration callback failed] uploadId=${session.uploadId}`
+                + ` error=${error instanceof Error ? error.message : String(error)}`,
+            );
+        });
     }
 
     private async hashFile(filePath: string): Promise<{ size: number; sha256: string }> {
