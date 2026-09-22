@@ -32,6 +32,15 @@ export type UploadSessionErrorCode =
     | "PART_UPLOAD_ABORTED"
     | "PART_UPLOAD_FAILED"
     | "PART_STORAGE_INCONSISTENT"
+    | "UPLOAD_INCOMPLETE"
+    | "FINALIZATION_NOT_ALLOWED"
+    | "PART_INTEGRITY_MISMATCH"
+    | "INSUFFICIENT_DISK_SPACE"
+    | "FINAL_SIZE_MISMATCH"
+    | "FINAL_HASH_MISMATCH"
+    | "FINALIZATION_IO_FAILED"
+    | "FINAL_PROMOTION_FAILED"
+    | "FINAL_ARTIFACT_INCONSISTENT"
     | "UPLOAD_CANCELLED"
     | "UPLOAD_EXPIRED"
     | "UPLOAD_NOT_ACTIVE";
@@ -65,6 +74,8 @@ export interface UploadSessionServiceOptions {
     now?: () => Date;
     idFactory?: () => string;
     logger?: UploadSessionLogger;
+    getFreeDiskBytes?: (directory: string) => number;
+    finalizationFaultInjector?: (stage: "before-assembly" | "during-assembly" | "before-promotion", processedBytes: number) => void;
 }
 
 export interface UploadSessionLogger {
@@ -93,6 +104,11 @@ export interface UploadPartResult {
     status: "uploading";
 }
 
+export interface CompleteUploadResult {
+    session: UploadSessionRecord;
+    alreadyComplete: boolean;
+}
+
 const extensionByKind: Record<UploadFileKind, ReadonlySet<string>> = {
     "structured-e57": new Set([".e57"]),
     ifc: new Set([".ifc"]),
@@ -118,6 +134,19 @@ export function configuredMaxResumableUploadBytes(raw = process.env.SYMETRIQ_MAX
         throw new Error("SYMETRIQ_MAX_RESUMABLE_UPLOAD_BYTES must be a positive safe integer byte count.");
     }
     return parsed;
+}
+
+export function requiredFinalizationFreeBytes(totalBytes: number): number {
+    if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
+        throw new UploadSessionError("INVALID_FILE_SIZE", "Finalization size must be a positive safe integer.", 400);
+    }
+    const safetyMargin = Math.max(512 * 1024 ** 2, Math.ceil(totalBytes * 0.05));
+    return totalBytes + safetyMargin;
+}
+
+export function finalizationPercent(processedBytes: number, totalBytes: number): number {
+    if (!Number.isSafeInteger(processedBytes) || !Number.isSafeInteger(totalBytes) || totalBytes <= 0) return 0;
+    return Math.min(100, (processedBytes / totalBytes) * 100);
 }
 
 function requiredString(value: unknown, field: string): string {
@@ -280,7 +309,10 @@ export class UploadSessionService {
     private readonly now: () => Date;
     private readonly idFactory: () => string;
     private readonly logger: UploadSessionLogger;
+    private readonly getFreeDiskBytes: (directory: string) => number;
+    private readonly finalizationFaultInjector?: UploadSessionServiceOptions["finalizationFaultInjector"];
     private readonly sessionLockTails = new Map<string, Promise<void>>();
+    private readonly finalizationTasks = new Map<string, Promise<void>>();
 
     constructor(
         private readonly repository: UploadSessionRepository,
@@ -293,10 +325,19 @@ export class UploadSessionService {
         this.now = options.now ?? (() => new Date());
         this.idFactory = options.idFactory ?? randomUUID;
         this.logger = options.logger ?? console;
+        this.getFreeDiskBytes = options.getFreeDiskBytes ?? ((directory) => {
+            const statistics = fs.statfsSync(directory);
+            return statistics.bavail * statistics.bsize;
+        });
+        this.finalizationFaultInjector = options.finalizationFaultInjector;
         if (!Number.isSafeInteger(this.chunkSize) || this.chunkSize <= 0
             || !Number.isSafeInteger(this.maxUploadBytes) || this.maxUploadBytes <= 0
             || !Number.isSafeInteger(this.expiryMs) || this.expiryMs <= 0) {
             throw new Error("Upload session service limits must be positive safe integers.");
+        }
+        const recoverable = this.repository.listFinalizingUploadIds();
+        if (recoverable.length > 0) {
+            this.logger.info(`[Upload finalize recovery discovered] count=${recoverable.length} strategy=lazy-restart-from-zero`);
         }
     }
 
@@ -389,10 +430,93 @@ export class UploadSessionService {
                 true,
             );
         }
+        try {
+            this.repository.assertFinalizedArtifactStorage(session);
+        } catch (error) {
+            this.logger.error(
+                `[Upload finalized artifact inconsistent] uploadId=${uploadId}`
+                + ` error=${error instanceof Error ? error.message : String(error)}`,
+            );
+            throw new UploadSessionError(
+                "FINAL_ARTIFACT_INCONSISTENT",
+                "The completed upload artifact does not match its durable manifest.",
+                500,
+                true,
+            );
+        }
         // Reads are deliberately non-mutating. R2B.6 owns the durable
         // transition to expired; clients can already observe expiresAt.
         this.log("loaded", session);
         return session;
+    }
+
+    getSessionStatus(uploadId: string): UploadSessionRecord {
+        const session = this.getSession(uploadId);
+        if (session.status === "finalizing") this.ensureFinalizationTask(uploadId, true);
+        return session;
+    }
+
+    async completeSession(uploadId: string): Promise<CompleteUploadResult> {
+        const normalizedUploadId = requiredString(uploadId, "uploadId");
+        let result!: CompleteUploadResult;
+        await this.withSessionLock(normalizedUploadId, async () => {
+            const session = this.getSession(normalizedUploadId);
+            this.logger.info(
+                `[Upload finalize request] uploadId=${session.uploadId} projectId=${session.projectId}`
+                + ` totalBytes=${session.totalBytes} totalParts=${session.totalParts} status=${session.status}`,
+            );
+            if (session.status === "complete") {
+                result = { session, alreadyComplete: true };
+                return;
+            }
+            if (session.status === "cancelled") {
+                throw new UploadSessionError("UPLOAD_CANCELLED", "The upload session was cancelled.", 409);
+            }
+            if (session.status === "expired" || this.now().getTime() >= Date.parse(session.expiresAt)) {
+                throw new UploadSessionError("UPLOAD_EXPIRED", "The upload session has expired.", 410);
+            }
+            if (session.status === "failed" && !session.error?.retryable) {
+                throw new UploadSessionError(
+                    "FINALIZATION_NOT_ALLOWED",
+                    "The upload failed with a non-retryable integrity error.",
+                    409,
+                );
+            }
+            if (session.status === "finalizing") {
+                result = { session, alreadyComplete: false };
+                return;
+            }
+            if (session.status !== "created" && session.status !== "uploading" && session.status !== "failed") {
+                throw new UploadSessionError("FINALIZATION_NOT_ALLOWED", `Status ${session.status} cannot be finalized.`, 409);
+            }
+            this.assertCompletePartSet(session);
+            const timestamp = this.now().toISOString();
+            const {
+                error: _previousError,
+                finalBytes: _previousFinalBytes,
+                finalSha256: _previousFinalSha256,
+                finalizedAt: _previousFinalizedAt,
+                finalizedArtifactName: _previousFinalizedArtifactName,
+                ...sessionWithoutFinalResult
+            } = session;
+            const finalizing: UploadSessionRecord = {
+                ...sessionWithoutFinalResult,
+                status: "finalizing",
+                finalizationStartedAt: timestamp,
+                finalizationUpdatedAt: timestamp,
+                updatedAt: timestamp,
+            };
+            this.repository.save(finalizing);
+            result = { session: finalizing, alreadyComplete: false };
+        });
+        if (!result.alreadyComplete) this.ensureFinalizationTask(normalizedUploadId, result.session.status === "finalizing");
+        return result;
+    }
+
+    async waitForFinalization(uploadId: string): Promise<UploadSessionRecord> {
+        const session = this.getSession(uploadId);
+        if (session.status === "finalizing") await this.ensureFinalizationTask(uploadId, true);
+        return this.getSession(uploadId);
     }
 
     async uploadPart(input: UploadPartInput): Promise<UploadPartResult> {
@@ -468,6 +592,13 @@ export class UploadSessionService {
                     409,
                 );
             }
+            if (session.status === "finalizing") {
+                throw new UploadSessionError(
+                    "UPLOAD_NOT_ACTIVE",
+                    "A finalizing upload cannot be cancelled while assembly is active.",
+                    409,
+                );
+            }
             if (session.status === "cancelled" || session.status === "expired") return session;
             const updated: UploadSessionRecord = {
                 ...session,
@@ -482,6 +613,270 @@ export class UploadSessionService {
             this.log("cancelled", updated);
             return updated;
         });
+    }
+
+    private assertCompletePartSet(session: UploadSessionRecord): void {
+        if (session.totalParts <= 0
+            || session.parts.length !== session.totalParts
+            || session.receivedBytes !== session.totalBytes) {
+            throw new UploadSessionError("UPLOAD_INCOMPLETE", "All upload parts must be present before finalization.", 409);
+        }
+        for (let partNumber = 0; partNumber < session.totalParts; partNumber += 1) {
+            const part = session.parts[partNumber];
+            if (!part || part.partNumber !== partNumber || part.size !== expectedPartBytes(session, partNumber)) {
+                throw new UploadSessionError("UPLOAD_INCOMPLETE", `Upload part ${partNumber} is missing or invalid.`, 409);
+            }
+        }
+        try {
+            this.repository.assertCommittedPartStorage(session);
+        } catch {
+            throw new UploadSessionError(
+                "PART_STORAGE_INCONSISTENT",
+                "The upload session manifest and committed part storage disagree.",
+                500,
+                true,
+            );
+        }
+    }
+
+    private ensureFinalizationTask(uploadId: string, recovery: boolean): Promise<void> {
+        const existing = this.finalizationTasks.get(uploadId);
+        if (existing) return existing;
+        if (recovery) {
+            this.logger.info(`[Upload finalize recovery] uploadId=${uploadId} action=reconcile-or-restart-from-zero`);
+        }
+        const task = this.runFinalization(uploadId)
+            .catch((error) => {
+                // The HTTP request does not own this background task. If even
+                // failure-state persistence is unavailable, leave the durable
+                // finalizing intent for the next lazy recovery attempt.
+                this.logger.error(
+                    `[Upload finalize background failure] uploadId=${uploadId}`
+                    + ` error=${error instanceof Error ? error.message : String(error)}`,
+                );
+            })
+            .finally(() => {
+                if (this.finalizationTasks.get(uploadId) === task) this.finalizationTasks.delete(uploadId);
+            });
+        this.finalizationTasks.set(uploadId, task);
+        return task;
+    }
+
+    private async runFinalization(uploadId: string): Promise<void> {
+        const startedAt = Date.now();
+        let processedBytes = 0;
+        let stage = "prepare";
+        try {
+            const session = this.repository.get(uploadId);
+            if (!session || session.status !== "finalizing") return;
+            this.assertCompletePartSet(session);
+            this.repository.prepareFinalizationDirectories(uploadId);
+            const temporaryPath = this.repository.getAssemblyTemporaryPath(uploadId);
+            const finalPath = this.repository.getFinalizedArtifactPath(session);
+
+            if (fs.existsSync(finalPath)) {
+                stage = "reconcile-promoted-artifact";
+                const [reconciled, authoritative] = await Promise.all([
+                    this.hashFile(finalPath),
+                    this.hashAuthoritativeParts(session),
+                ]);
+                if (reconciled.size === session.totalBytes
+                    && authoritative.size === session.totalBytes
+                    && reconciled.sha256 === authoritative.sha256
+                    && (!session.expectedSha256 || reconciled.sha256 === session.expectedSha256)) {
+                    await this.persistCompleted(session, reconciled.size, reconciled.sha256);
+                    this.logger.info(`[Upload finalize recovery] uploadId=${uploadId} action=reconciled-promoted-artifact`);
+                    return;
+                }
+                fs.rmSync(finalPath, { force: true });
+            }
+
+            // Recovery always discards an untrusted partial assembly and starts from part zero.
+            fs.rmSync(temporaryPath, { force: true });
+            const availableDisk = this.getFreeDiskBytes(this.repository.getSessionDirectory(uploadId));
+            const requiredDisk = requiredFinalizationFreeBytes(session.totalBytes);
+            if (!Number.isSafeInteger(availableDisk) || availableDisk < requiredDisk) {
+                throw new UploadSessionError(
+                    "INSUFFICIENT_DISK_SPACE",
+                    `Finalization requires at least ${requiredDisk} free bytes; ${availableDisk} are available.`,
+                    507,
+                    true,
+                );
+            }
+            this.logger.info(
+                `[Upload finalize start] uploadId=${uploadId} availableDisk=${availableDisk}`
+                + ` expectedBytes=${session.totalBytes}`,
+            );
+            this.finalizationFaultInjector?.("before-assembly", 0);
+            stage = "assemble";
+            const hash = createHash("sha256");
+            const output = await fs.promises.open(temporaryPath, "wx");
+            let lastProgressAt = Date.now();
+            try {
+                for (const part of session.parts) {
+                    const partHash = createHash("sha256");
+                    let partBytes = 0;
+                    const input = fs.createReadStream(this.repository.getPartPath(uploadId, part.partNumber));
+                    for await (const rawChunk of input) {
+                        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+                        partBytes += chunk.length;
+                        processedBytes += chunk.length;
+                        partHash.update(chunk);
+                        hash.update(chunk);
+                        let offset = 0;
+                        while (offset < chunk.length) {
+                            const write = await output.write(chunk, offset, chunk.length - offset);
+                            offset += write.bytesWritten;
+                        }
+                        this.finalizationFaultInjector?.("during-assembly", processedBytes);
+                        const now = Date.now();
+                        if (now - lastProgressAt >= 30_000) {
+                            const seconds = Math.max(0.001, (now - startedAt) / 1000);
+                            this.logger.info(
+                                `[Upload finalize progress] uploadId=${uploadId} partsProcessed=${part.partNumber}`
+                                + ` bytesAssembled=${processedBytes} percent=${finalizationPercent(processedBytes, session.totalBytes).toFixed(2)}`
+                                + ` throughputMBps=${(processedBytes / 1024 ** 2 / seconds).toFixed(2)}`,
+                            );
+                            lastProgressAt = now;
+                        }
+                    }
+                    if (partBytes !== part.size || partHash.digest("hex") !== part.sha256) {
+                        throw new UploadSessionError(
+                            "PART_INTEGRITY_MISMATCH",
+                            `Upload part ${part.partNumber} no longer matches its persisted size and SHA-256.`,
+                            422,
+                        );
+                    }
+                }
+                await output.sync();
+            } finally {
+                await output.close();
+            }
+            if (processedBytes !== session.totalBytes) {
+                throw new UploadSessionError(
+                    "FINAL_SIZE_MISMATCH",
+                    `Assembled ${processedBytes} bytes; expected ${session.totalBytes}.`,
+                    422,
+                );
+            }
+            const finalSha256 = hash.digest("hex");
+            if (session.expectedSha256 && finalSha256 !== session.expectedSha256) {
+                throw new UploadSessionError("FINAL_HASH_MISMATCH", "The assembled file SHA-256 does not match expectedSha256.", 422);
+            }
+            this.finalizationFaultInjector?.("before-promotion", processedBytes);
+            stage = "promote";
+            try {
+                fs.renameSync(temporaryPath, finalPath);
+            } catch (error) {
+                throw new UploadSessionError(
+                    "FINAL_PROMOTION_FAILED",
+                    `The finalized upload artifact could not be promoted: ${error instanceof Error ? error.message : String(error)}`,
+                    500,
+                    true,
+                );
+            }
+            await this.persistCompleted(session, processedBytes, finalSha256);
+            const elapsedMs = Date.now() - startedAt;
+            this.logger.info(
+                `[Upload finalize complete] uploadId=${uploadId} finalBytes=${processedBytes}`
+                + ` finalSha256=${finalSha256} elapsedMs=${elapsedMs}`
+                + ` averageMBps=${(processedBytes / 1024 ** 2 / Math.max(0.001, elapsedMs / 1000)).toFixed(2)}`,
+            );
+        } catch (error) {
+            fs.rmSync(this.repository.getAssemblyTemporaryPath(uploadId), { force: true });
+            const normalized = this.normalizeFinalizationError(error);
+            await this.persistFinalizationFailure(uploadId, normalized);
+            this.logger.error(
+                `[Upload finalize failure] uploadId=${uploadId} code=${normalized.code}`
+                + ` stage=${stage} processedBytes=${processedBytes} error=${normalized.message}`,
+            );
+        }
+    }
+
+    private async hashFile(filePath: string): Promise<{ size: number; sha256: string }> {
+        const hash = createHash("sha256");
+        let size = 0;
+        for await (const rawChunk of fs.createReadStream(filePath)) {
+            const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+            size += chunk.length;
+            hash.update(chunk);
+        }
+        return { size, sha256: hash.digest("hex") };
+    }
+
+    private async hashAuthoritativeParts(session: UploadSessionRecord): Promise<{ size: number; sha256: string }> {
+        const finalHash = createHash("sha256");
+        let totalSize = 0;
+        for (const part of session.parts) {
+            const partHash = createHash("sha256");
+            let partSize = 0;
+            for await (const rawChunk of fs.createReadStream(this.repository.getPartPath(session.uploadId, part.partNumber))) {
+                const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+                partSize += chunk.length;
+                totalSize += chunk.length;
+                partHash.update(chunk);
+                finalHash.update(chunk);
+            }
+            if (partSize !== part.size || partHash.digest("hex") !== part.sha256) {
+                throw new UploadSessionError(
+                    "PART_INTEGRITY_MISMATCH",
+                    `Upload part ${part.partNumber} no longer matches its persisted size and SHA-256.`,
+                    422,
+                );
+            }
+        }
+        return { size: totalSize, sha256: finalHash.digest("hex") };
+    }
+
+    private async persistCompleted(session: UploadSessionRecord, finalBytes: number, finalSha256: string): Promise<void> {
+        await this.withSessionLock(session.uploadId, async () => {
+            const current = this.repository.get(session.uploadId);
+            if (!current || current.status === "complete") return;
+            if (current.status !== "finalizing") {
+                throw new UploadSessionError("FINALIZATION_NOT_ALLOWED", "Finalization state changed before completion.", 409);
+            }
+            const timestamp = this.now().toISOString();
+            const { error: _previousError, ...currentWithoutError } = current;
+            this.repository.save({
+                ...currentWithoutError,
+                status: "complete",
+                finalBytes,
+                finalSha256,
+                finalizedAt: timestamp,
+                finalizedArtifactName: this.repository.getFinalizedArtifactName(current),
+                finalizationUpdatedAt: timestamp,
+                updatedAt: timestamp,
+            });
+        });
+    }
+
+    private async persistFinalizationFailure(uploadId: string, error: UploadSessionError): Promise<void> {
+        await this.withSessionLock(uploadId, async () => {
+            const current = this.repository.get(uploadId);
+            if (!current || current.status !== "finalizing") return;
+            const timestamp = this.now().toISOString();
+            this.repository.save({
+                ...current,
+                status: "failed",
+                finalizationUpdatedAt: timestamp,
+                updatedAt: timestamp,
+                error: { code: error.code, message: error.message, retryable: error.retryable },
+            });
+        });
+    }
+
+    private normalizeFinalizationError(error: unknown): UploadSessionError {
+        if (error instanceof UploadSessionError) return error;
+        const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+        if (code === "ENOSPC") {
+            return new UploadSessionError("INSUFFICIENT_DISK_SPACE", "Disk space was exhausted during finalization.", 507, true);
+        }
+        return new UploadSessionError(
+            "FINALIZATION_IO_FAILED",
+            `Finalization I/O failed: ${error instanceof Error ? error.message : String(error)}`,
+            500,
+            true,
+        );
     }
 
     private async commitPart(

@@ -46,7 +46,16 @@ export function createUploadSessionRouter(service: UploadSessionService): expres
 
     router.get("/api/uploads/:uploadId", (request, response) => {
         try {
-            response.json(toUploadSessionResponse(service.getSession(String(request.params.uploadId ?? ""))));
+            response.json(toUploadSessionResponse(service.getSessionStatus(String(request.params.uploadId ?? ""))));
+        } catch (error) {
+            sendError(response, error);
+        }
+    });
+
+    router.post("/api/uploads/:uploadId/complete", async (request, response) => {
+        try {
+            const result = await service.completeSession(String(request.params.uploadId ?? ""));
+            response.status(result.alreadyComplete ? 200 : 202).json(toUploadSessionResponse(result.session));
         } catch (error) {
             sendError(response, error);
         }

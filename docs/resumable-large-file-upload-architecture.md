@@ -957,3 +957,47 @@ upload is retired).
 
 R2B.2 still has no complete/finalization endpoint, project-file registration or
 conversion trigger.
+
+## 28. R2B.3 implementation clarification
+
+R2B.3 activates asynchronous and restart-recoverable finalization:
+
+- `POST /api/uploads/:uploadId/complete` validates the durable manifest and
+  actual part files, atomically persists `status: finalizing`, starts one
+  process-local background task per upload, and returns `202 Accepted` without
+  waiting for multi-gigabyte assembly. A completed replay returns `200` with
+  the existing result.
+- State transitions are `created/uploading -> finalizing -> complete`. A
+  finalization error transitions to `failed` with a stable code, message and
+  retryable flag. Retrying `/complete` is allowed only for retryable failures;
+  integrity failures are deliberately non-retryable because immutable parts or
+  the declared expected hash would first need a new upload session.
+- The authoritative parts remain under `parts/`. Assembly uses the single
+  non-authoritative `finalizing/assembly.tmp` path and promotes it by atomic
+  same-filesystem rename to
+  `finalized/<reservedFileId><normalizedExtension>`. This is a finalized upload
+  artifact, not a `ProjectFileRecord`, and it triggers no conversion.
+- Assembly reads parts in numeric order with bounded stream chunks. The same
+  pass checks every part's persisted size and SHA-256, writes output, counts
+  final bytes and computes the whole-file SHA-256. It fsyncs and closes the
+  output before promotion. `totalBytes` and optional `expectedSha256` must
+  match exactly.
+- A practical preflight requires free bytes for the assembled file plus the
+  larger of 512 MiB or 5% safety headroom. `ENOSPC`, other I/O failures and
+  promotion failures remove only `assembly.tmp`; immutable parts remain.
+- Concurrent/repeated complete calls are serialized by the session lock and
+  share one background task. They cannot produce duplicate final artifacts.
+- Startup performs only a lightweight discovery of `finalizing` manifests and
+  never blocks on assembly. A subsequent GET or complete request starts lazy
+  recovery. Recovery deletes any partial `assembly.tmp` and restarts from part
+  zero. This intentionally favors correctness over byte-offset checkpoint
+  complexity; a crash during a 50 GiB assembly may repeat sequential I/O.
+- If atomic promotion succeeded but the process stopped before the completion
+  manifest was saved, recovery hashes both the promoted artifact and all
+  immutable parts, verifies byte count and equality, then reconciles the
+  manifest without creating a second artifact.
+- Completed manifests expose only `finalBytes`, `finalSha256`, `finalizedAt`
+  and the safe artifact basename. Absolute server paths are never public.
+
+Part cleanup, expiration scheduling, permanent project-file registration and
+E57/IFC processing remain deferred to R2B.5/R2B.6.

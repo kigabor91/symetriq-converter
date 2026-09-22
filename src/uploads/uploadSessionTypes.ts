@@ -45,6 +45,11 @@ export interface UploadSessionRecord {
     receivedBytes: number;
     expectedSha256?: string;
     finalSha256?: string;
+    finalBytes?: number;
+    finalizationStartedAt?: string;
+    finalizationUpdatedAt?: string;
+    finalizedAt?: string;
+    finalizedArtifactName?: string;
     idempotencyKey?: string;
     status: UploadSessionStatus;
     parts: UploadPartRecord[];
@@ -72,6 +77,9 @@ export interface UploadSessionResponse {
     updatedAt: string;
     expiresAt: string;
     finalSha256?: string;
+    finalBytes?: number;
+    finalizedAt?: string;
+    finalizedArtifactName?: string;
     finalAsset?: { projectId: string; fileId: string; revision: number };
     error?: { code: string; message: string; retryable: boolean };
 }
@@ -93,6 +101,9 @@ export function toUploadSessionResponse(session: UploadSessionRecord): UploadSes
         updatedAt: session.updatedAt,
         expiresAt: session.expiresAt,
         ...(session.finalSha256 ? { finalSha256: session.finalSha256 } : {}),
+        ...(session.finalBytes !== undefined ? { finalBytes: session.finalBytes } : {}),
+        ...(session.finalizedAt ? { finalizedAt: session.finalizedAt } : {}),
+        ...(session.finalizedArtifactName ? { finalizedArtifactName: session.finalizedArtifactName } : {}),
         ...(session.finalAsset ? { finalAsset: session.finalAsset } : {}),
         ...(session.error ? { error: session.error } : {}),
     };

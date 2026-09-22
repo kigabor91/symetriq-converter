@@ -328,7 +328,28 @@ test("cancelled, expired and non-active sessions reject part uploads determinist
     for (const { status, code } of statuses) {
         const { repository, service } = fixture();
         const session = createSession(service, 4);
-        repository.save({ ...session, status });
+        repository.save({
+            ...session,
+            status,
+            ...(status === "finalizing" ? { finalizationStartedAt: "2026-09-22T10:00:00.000Z" } : {}),
+            ...(status === "complete" ? {
+                finalBytes: session.totalBytes,
+                finalSha256: "a".repeat(64),
+                finalizedAt: "2026-09-22T10:00:00.000Z",
+                finalizedArtifactName: `${session.reservedFileId}${session.normalizedExtension}`,
+            } : {}),
+        });
+        if (status === "complete") {
+            repository.prepareFinalizationDirectories(session.uploadId);
+            fs.writeFileSync(repository.getFinalizedArtifactPath({
+                ...session,
+                status,
+                finalBytes: session.totalBytes,
+                finalSha256: "a".repeat(64),
+                finalizedAt: "2026-09-22T10:00:00.000Z",
+                finalizedArtifactName: `${session.reservedFileId}${session.normalizedExtension}`,
+            }), Buffer.alloc(session.totalBytes));
+        }
         await expectUploadError(putPart(service, session.uploadId, 0, Buffer.from("data")), code);
     }
 });

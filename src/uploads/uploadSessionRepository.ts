@@ -99,9 +99,38 @@ export function parseUploadSessionRecord(value: unknown, expectedUploadId?: stri
     if (value.idempotencyKey !== undefined && typeof value.idempotencyKey !== "string") {
         throw new Error("Upload session idempotency key is invalid.");
     }
+    for (const timestampField of ["finalizationStartedAt", "finalizationUpdatedAt", "finalizedAt"] as const) {
+        if (value[timestampField] !== undefined && !validTimestamp(value[timestampField])) {
+            throw new Error(`Upload session ${timestampField} is invalid.`);
+        }
+    }
+    if (value.finalBytes !== undefined
+        && (!Number.isSafeInteger(value.finalBytes) || Number(value.finalBytes) < 0 || Number(value.finalBytes) > Number(totalBytes))) {
+        throw new Error("Upload session final byte count is invalid.");
+    }
+    if (value.finalSha256 !== undefined
+        && (typeof value.finalSha256 !== "string" || !sha256Pattern.test(value.finalSha256))) {
+        throw new Error("Upload session final SHA-256 is invalid.");
+    }
+    if (value.finalizedArtifactName !== undefined
+        && (typeof value.finalizedArtifactName !== "string"
+            || value.finalizedArtifactName.length === 0
+            || path.basename(value.finalizedArtifactName) !== value.finalizedArtifactName)) {
+        throw new Error("Upload session finalized artifact name is invalid.");
+    }
     const parts = parseParts(value.parts, Number(totalParts), Number(totalBytes), Number(chunkSize));
     if (parts.reduce((sum, part) => sum + part.size, 0) !== Number(receivedBytes)) {
         throw new Error("Upload session received byte count does not match its parts.");
+    }
+    if (value.status === "finalizing" && !validTimestamp(value.finalizationStartedAt)) {
+        throw new Error("A finalizing upload session must persist its finalization start time.");
+    }
+    if (value.status === "complete"
+        && (Number(value.finalBytes) !== Number(totalBytes)
+            || typeof value.finalSha256 !== "string"
+            || !validTimestamp(value.finalizedAt)
+            || typeof value.finalizedArtifactName !== "string")) {
+        throw new Error("A completed upload session is missing finalized artifact metadata.");
     }
     return value as unknown as UploadSessionRecord;
 }
@@ -128,6 +157,45 @@ export class UploadSessionRepository {
 
     getTemporaryPartPath(uploadId: string, partNumber: number, temporaryId: string): string {
         return path.join(this.getPartsDirectory(uploadId), `.${this.partFilename(partNumber)}.${temporaryId}.tmp`);
+    }
+
+    getFinalizingDirectory(uploadId: string): string {
+        return path.join(this.getSessionDirectory(uploadId), "finalizing");
+    }
+
+    getAssemblyTemporaryPath(uploadId: string): string {
+        return path.join(this.getFinalizingDirectory(uploadId), "assembly.tmp");
+    }
+
+    getFinalizedDirectory(uploadId: string): string {
+        return path.join(this.getSessionDirectory(uploadId), "finalized");
+    }
+
+    getFinalizedArtifactName(session: UploadSessionRecord): string {
+        return `${session.reservedFileId}${session.normalizedExtension}`;
+    }
+
+    getFinalizedArtifactPath(session: UploadSessionRecord): string {
+        return path.join(this.getFinalizedDirectory(session.uploadId), this.getFinalizedArtifactName(session));
+    }
+
+    prepareFinalizationDirectories(uploadId: string): void {
+        fs.mkdirSync(this.getFinalizingDirectory(uploadId), { recursive: true });
+        fs.mkdirSync(this.getFinalizedDirectory(uploadId), { recursive: true });
+    }
+
+    listFinalizingUploadIds(): string[] {
+        if (!fs.existsSync(this.rootDirectory)) return [];
+        const result: string[] = [];
+        for (const entry of fs.readdirSync(this.rootDirectory, { withFileTypes: true })) {
+            if (!entry.isDirectory() || !uploadIdPattern.test(entry.name)) continue;
+            try {
+                if (this.get(entry.name)?.status === "finalizing") result.push(entry.name);
+            } catch {
+                // Corrupt manifests remain visible to normal diagnostics; discovery must not block startup.
+            }
+        }
+        return result;
     }
 
     create(session: UploadSessionRecord): void {
@@ -189,9 +257,21 @@ export class UploadSessionRepository {
         }
     }
 
+    assertFinalizedArtifactStorage(session: UploadSessionRecord): void {
+        if (session.status !== "complete") return;
+        const expectedName = this.getFinalizedArtifactName(session);
+        if (session.finalizedArtifactName !== expectedName) {
+            throw new Error("Completed upload artifact name does not match its reserved identity.");
+        }
+        const artifactPath = this.getFinalizedArtifactPath(session);
+        if (!fs.existsSync(artifactPath) || fs.statSync(artifactPath).size !== session.finalBytes) {
+            throw new Error("Completed upload artifact is missing or has an unexpected size.");
+        }
+    }
+
     removeTemporaryData(uploadId: string): void {
         const sessionDirectory = this.getSessionDirectory(uploadId);
-        for (const entry of ["parts", "incoming"]) {
+        for (const entry of ["parts", "incoming", "finalizing", "finalized"]) {
             fs.rmSync(path.join(sessionDirectory, entry), { recursive: true, force: true });
         }
         fs.rmSync(path.join(sessionDirectory, "assembled.tmp"), { force: true });
