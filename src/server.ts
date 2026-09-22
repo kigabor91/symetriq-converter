@@ -1498,7 +1498,16 @@ app.use((error: unknown, request: express.Request, response: express.Response, n
     response.status(500).json({ error: "The upload or conversion request failed. Check the converter server log for details." });
 });
 
-const server = app.listen(port, () => {
+const server = app.listen(port, (error?: Error) => {
+    if (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "LISTEN_FAILED";
+        console.error(
+            `[HTTP server startup failed] port=${port} code=${code}`
+            + ` error=${error.message}`,
+        );
+        process.exitCode = 1;
+        return;
+    }
     console.log(`SymetrIQ project server listening on http://localhost:${port}`);
 });
 
