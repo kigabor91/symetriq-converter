@@ -904,3 +904,22 @@ The implementation stages must not change:
 
 The outcome is one robust transport subsystem feeding the already established
 project asset and processing boundaries.
+
+## 26. R2B.1 implementation clarification
+
+The foundation implementation uses these concrete limits and behaviours:
+
+- `POST /api/projects/:projectId/uploads` creates a session;
+- `GET /api/uploads/:uploadId` reads its persisted state;
+- `DELETE /api/uploads/:uploadId` persistently marks it cancelled and removes
+  temporary byte directories while retaining the manifest tombstone;
+- default maximum resumable file size is 50 GiB and can be configured as an
+  exact byte count with `SYMETRIQ_MAX_RESUMABLE_UPLOAD_BYTES`;
+- create idempotency is scoped to project plus the `Idempotency-Key` header;
+- `session.json` stores internal part records, while the API exposes their
+  sorted part numbers as `uploadedParts`;
+- GET is read-only: an elapsed `expiresAt` remains observable without silently
+  changing or deleting the session. R2B.6 owns the durable `expired`
+  transition and cleanup.
+
+R2B.1 intentionally exposes no part-upload or completion endpoint.

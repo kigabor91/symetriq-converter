@@ -9,6 +9,9 @@ import { convertE57 } from "./convertE57.js";
 import { createPublishRouter } from "./publish/publishRoutes.js";
 import { CanonicalPropertyStore } from "./publish/canonicalPropertyStore.js";
 import { queryCanonicalMetadataProperty } from "./publish/canonicalMetadataQuery.js";
+import { UploadSessionRepository } from "./uploads/uploadSessionRepository.js";
+import { createUploadSessionRouter } from "./uploads/uploadSessionRoutes.js";
+import { UploadSessionService } from "./uploads/uploadSessionService.js";
 import {
     cleanupUploadFiles,
     LARGE_UPLOAD_REQUEST_TIMEOUT_MS,
@@ -35,6 +38,13 @@ const port = Number(process.env.SYMETRIQ_SERVER_PORT ?? 3001);
 const app = express();
 const temporaryUploadDirectory = path.join(getDataDirectory(), "upload-temp");
 fs.mkdirSync(temporaryUploadDirectory, { recursive: true });
+const uploadSessionRepository = new UploadSessionRepository(
+    path.join(getDataDirectory(), "upload-sessions"),
+);
+const uploadSessionService = new UploadSessionService(
+    uploadSessionRepository,
+    (projectId) => readProjects().some(({ id }) => id === projectId),
+);
 
 const uploadDiagnostics = new WeakMap<object, UploadDiagnosticsContext>();
 
@@ -371,6 +381,7 @@ function servePrecompressedViewerAsset(
 
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "50mb" }));
+app.use(createUploadSessionRouter(uploadSessionService));
 app.use("/api/hub", createPublishRouter());
 app.use("/project-files", servePrecompressedViewerAsset);
 app.use(
