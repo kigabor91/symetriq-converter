@@ -123,6 +123,7 @@ test("adopts a finalized resumable E57 into one canonical project file and dispa
     await integration.ensure(session.uploadId);
     assert.equal(project.files.length, 1);
     assert.deepEqual(dispatches, [session.reservedFileId]);
+    assert.equal(repository.get(session.uploadId)?.integrationStage, "dispatched");
 });
 
 test("reconciles a crash after atomic move but before ProjectFileRecord persistence", async () => {

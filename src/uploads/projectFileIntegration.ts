@@ -118,7 +118,7 @@ export class ProjectFileIntegrationService {
             });
             if (!updated || !fileRecord) throw new Error("Project no longer exists.");
             session = this.persist(session, {
-                integrationStage: "registered",
+                integrationStage: session.integrationStage === "dispatched" ? "dispatched" : "registered",
                 projectFileId: fileRecord.id,
                 registeredAt: session.registeredAt ?? this.now().toISOString(),
                 finalAsset: {
