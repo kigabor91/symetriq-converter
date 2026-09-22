@@ -52,9 +52,25 @@ export function createUploadSessionRouter(service: UploadSessionService): expres
         }
     });
 
-    router.delete("/api/uploads/:uploadId", (request, response) => {
+    router.put("/api/uploads/:uploadId/parts/:partNumber", async (request, response) => {
         try {
-            response.json(toUploadSessionResponse(service.cancelSession(String(request.params.uploadId ?? ""))));
+            const result = await service.uploadPart({
+                uploadId: request.params.uploadId,
+                partNumber: request.params.partNumber,
+                contentLength: request.headers["content-length"],
+                contentType: request.headers["content-type"],
+                expectedSha256: request.headers["x-part-sha256"],
+                body: request,
+            });
+            response.status(result.alreadyPresent ? 200 : 201).json(result);
+        } catch (error) {
+            sendError(response, error);
+        }
+    });
+
+    router.delete("/api/uploads/:uploadId", async (request, response) => {
+        try {
+            response.json(toUploadSessionResponse(await service.cancelSession(String(request.params.uploadId ?? ""))));
         } catch (error) {
             sendError(response, error);
         }

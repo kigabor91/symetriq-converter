@@ -20,7 +20,7 @@ function validTimestamp(value: unknown): value is string {
     return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
-function parseParts(value: unknown, totalParts: number, totalBytes: number): UploadPartRecord[] {
+function parseParts(value: unknown, totalParts: number, totalBytes: number, chunkSize: number): UploadPartRecord[] {
     if (!Array.isArray(value)) throw new Error("Upload session parts must be an array.");
     const seen = new Set<number>();
     const parts = value.map((part): UploadPartRecord => {
@@ -31,13 +31,23 @@ function parseParts(value: unknown, totalParts: number, totalBytes: number): Upl
             || !Number.isSafeInteger(part.size)
             || Number(part.size) <= 0
             || typeof part.sha256 !== "string"
-            || !sha256Pattern.test(part.sha256)) {
+            || !sha256Pattern.test(part.sha256)
+            || !validTimestamp(part.completedAt)) {
             throw new Error("Upload session contains an invalid part record.");
         }
         const partNumber = Number(part.partNumber);
         if (seen.has(partNumber)) throw new Error("Upload session contains duplicate part records.");
+        const expectedSize = Math.min(chunkSize, totalBytes - (partNumber * chunkSize));
+        if (Number(part.size) !== expectedSize) {
+            throw new Error("Upload session part size does not match its expected chunk size.");
+        }
         seen.add(partNumber);
-        return { partNumber, size: Number(part.size), sha256: part.sha256 };
+        return {
+            partNumber,
+            size: Number(part.size),
+            sha256: part.sha256,
+            completedAt: part.completedAt,
+        };
     }).sort((left, right) => left.partNumber - right.partNumber);
     const receivedBytes = parts.reduce((sum, part) => sum + part.size, 0);
     if (!Number.isSafeInteger(receivedBytes) || receivedBytes > totalBytes) {
@@ -89,7 +99,7 @@ export function parseUploadSessionRecord(value: unknown, expectedUploadId?: stri
     if (value.idempotencyKey !== undefined && typeof value.idempotencyKey !== "string") {
         throw new Error("Upload session idempotency key is invalid.");
     }
-    const parts = parseParts(value.parts, Number(totalParts), Number(totalBytes));
+    const parts = parseParts(value.parts, Number(totalParts), Number(totalBytes), Number(chunkSize));
     if (parts.reduce((sum, part) => sum + part.size, 0) !== Number(receivedBytes)) {
         throw new Error("Upload session received byte count does not match its parts.");
     }
@@ -110,6 +120,14 @@ export class UploadSessionRepository {
 
     getPartsDirectory(uploadId: string): string {
         return path.join(this.getSessionDirectory(uploadId), "parts");
+    }
+
+    getPartPath(uploadId: string, partNumber: number): string {
+        return path.join(this.getPartsDirectory(uploadId), `${this.partFilename(partNumber)}.part`);
+    }
+
+    getTemporaryPartPath(uploadId: string, partNumber: number, temporaryId: string): string {
+        return path.join(this.getPartsDirectory(uploadId), `.${this.partFilename(partNumber)}.${temporaryId}.tmp`);
     }
 
     create(session: UploadSessionRecord): void {
@@ -149,6 +167,28 @@ export class UploadSessionRepository {
         return undefined;
     }
 
+    assertCommittedPartStorage(session: UploadSessionRecord): void {
+        const partsDirectory = this.getPartsDirectory(session.uploadId);
+        const expected = new Map(session.parts.map((part) => [this.partFilename(part.partNumber), part]));
+        if (!fs.existsSync(partsDirectory)) {
+            if (expected.size > 0) throw new Error("Upload session part storage is missing committed files.");
+            return;
+        }
+        const actual = fs.readdirSync(partsDirectory, { withFileTypes: true })
+            .filter((entry) => entry.isFile() && /^\d{8}\.part$/.test(entry.name));
+        for (const entry of actual) {
+            if (!expected.has(entry.name.slice(0, -".part".length))) {
+                throw new Error("Upload session part storage contains an unrecorded committed file.");
+            }
+        }
+        for (const [filename, part] of expected) {
+            const partPath = path.join(partsDirectory, `${filename}.part`);
+            if (!fs.existsSync(partPath) || fs.statSync(partPath).size !== part.size) {
+                throw new Error("Upload session part storage does not match its manifest.");
+            }
+        }
+    }
+
     removeTemporaryData(uploadId: string): void {
         const sessionDirectory = this.getSessionDirectory(uploadId);
         for (const entry of ["parts", "incoming"]) {
@@ -184,5 +224,12 @@ export class UploadSessionRepository {
 
     private assertUploadId(uploadId: string): void {
         if (!uploadIdPattern.test(uploadId)) throw new Error("Invalid upload ID.");
+    }
+
+    private partFilename(partNumber: number): string {
+        if (!Number.isSafeInteger(partNumber) || partNumber < 0) {
+            throw new Error("Invalid upload part number.");
+        }
+        return partNumber.toString().padStart(8, "0");
     }
 }

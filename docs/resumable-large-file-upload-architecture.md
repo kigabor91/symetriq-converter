@@ -923,3 +923,37 @@ The foundation implementation uses these concrete limits and behaviours:
   transition and cleanup.
 
 R2B.1 intentionally exposes no part-upload or completion endpoint.
+
+## 27. R2B.2 implementation clarification
+
+R2B.2 activates the bounded binary part contract:
+
+- `PUT /api/uploads/:uploadId/parts/:partNumber` accepts only
+  `Content-Type: application/octet-stream`;
+- a valid exact `Content-Length` is required and independently verified against
+  the counted streamed bytes;
+- optional `X-Part-SHA256` is compared with the server-calculated SHA-256;
+- temporary files are named
+  `parts/.00000017.<server-generated-id>.tmp`, then fsynced and atomically
+  renamed to immutable `parts/00000017.part` only after full validation;
+- each committed manifest record stores `partNumber`, `size`, `sha256` and
+  `completedAt`;
+- a narrow in-process lock serializes only the immutable-part and
+  `session.json` commit per upload session. Streams for different parts remain
+  concurrent, while their manifest mutations cannot lose each other;
+- a repeated equal part returns `200` with `alreadyPresent: true`; a different
+  payload for an existing part returns `409 PART_CONFLICT` and does not replace
+  it;
+- a successful part changes `created` to `uploading`, recomputes
+  `receivedBytes`, and refreshes `updatedAt`/`expiresAt` for another 72 hours;
+- a failed or aborted stream removes its temporary file and leaves no part
+  record or byte count behind.
+
+The existing Viewer IIS configuration currently permits a larger legacy body,
+which already exceeds the new 64 MiB request requirement. No IIS change is
+needed for R2B.2. The resumable protocol itself only requires a site limit with
+safe headroom above 64 MiB (80–128 MiB is appropriate once legacy multipart
+upload is retired).
+
+R2B.2 still has no complete/finalization endpoint, project-file registration or
+conversion trigger.

@@ -21,6 +21,7 @@ export interface UploadPartRecord {
     partNumber: number;
     size: number;
     sha256: string;
+    completedAt: string;
 }
 
 /**

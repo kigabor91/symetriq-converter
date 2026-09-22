@@ -20,7 +20,10 @@ import {
 } from "./uploadSessionTypes.js";
 
 const temporaryDirectories: string[] = [];
-const silentLogger = { info: (_message?: unknown) => undefined };
+const silentLogger = {
+    info: (_message: string) => undefined,
+    error: (_message: string) => undefined,
+};
 
 afterEach(() => {
     while (temporaryDirectories.length > 0) {
@@ -218,13 +221,13 @@ test("reports a missing or malformed upload ID without path traversal", () => {
     expectUploadError(() => service.getSession("../../projects.json"), "UPLOAD_NOT_FOUND");
 });
 
-test("cancellation is durable, idempotent and removes temporary data only", () => {
+test("cancellation is durable, idempotent and removes temporary data only", async () => {
     const { repository, service } = createFixture();
     const session = service.createSession(validInput()).session;
     fs.writeFileSync(path.join(repository.getPartsDirectory(session.uploadId), "placeholder.part"), "temporary");
 
-    const cancelled = service.cancelSession(session.uploadId);
-    const repeated = service.cancelSession(session.uploadId);
+    const cancelled = await service.cancelSession(session.uploadId);
+    const repeated = await service.cancelSession(session.uploadId);
     assert.equal(cancelled.status, "cancelled");
     assert.equal(repeated.status, "cancelled");
     assert.equal(repeated.uploadId, session.uploadId);
@@ -249,10 +252,10 @@ test("repository rejects invalid uploaded-part invariants", () => {
     const session = service.createSession(validInput()).session;
     assert.throws(() => repository.save({
         ...session,
-        receivedBytes: 2,
+        receivedBytes: session.chunkSize,
         parts: [
-            { partNumber: 0, size: 1, sha256: "a".repeat(64) },
-            { partNumber: 0, size: 1, sha256: "b".repeat(64) },
+            { partNumber: 0, size: session.chunkSize, sha256: "a".repeat(64), completedAt: "2026-09-22T10:00:00.000Z" },
+            { partNumber: 0, size: session.chunkSize, sha256: "b".repeat(64), completedAt: "2026-09-22T10:00:00.000Z" },
         ],
     }), /duplicate part/i);
 });
