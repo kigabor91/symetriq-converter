@@ -65,7 +65,7 @@ function fixture() {
             status: session.fileKind === "point-cloud" ? "ready" : "queued",
         }),
         dispatchProjectFileProcessing: (_projectId, file, inputPath) => {
-            if (file.status !== "queued" || dispatched.has(file.id)) return false;
+            if ((file.status !== "queued" && file.status !== "processing") || dispatched.has(file.id)) return false;
             assert.ok(fs.existsSync(inputPath));
             dispatched.add(file.id);
             dispatches.push(file.id);
@@ -73,7 +73,7 @@ function fixture() {
         },
         logger: silentLogger,
     });
-    return { root, repository, service, project, integration, dispatches };
+    return { root, repository, service, project, integration, dispatches, dispatched };
 }
 
 async function finalizedSession(service: UploadSessionService, bytes: Buffer, fileKind: "ifc" | "structured-e57" = "structured-e57"): Promise<UploadSessionRecord> {
@@ -138,6 +138,57 @@ test("reconciles a crash after atomic move but before ProjectFileRecord persiste
     assert.equal(project.files.length, 1);
     assert.equal(project.files[0]?.id, session.reservedFileId);
     assert.deepEqual(fs.readFileSync(destination), bytes);
+    assert.deepEqual(dispatches, [session.reservedFileId]);
+});
+
+test("rejects a same-size but corrupted canonical source in the unregistered crash window", async () => {
+    const { root, repository, service, project, integration } = fixture();
+    const bytes = Buffer.from("ifc-source");
+    const session = await finalizedSession(service, bytes, "ifc");
+    const destination = path.join(root, "projects", project.id, "uploads", `${session.reservedFileId}.ifc`);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.renameSync(repository.getFinalizedArtifactPath(session), destination);
+    fs.writeFileSync(destination, Buffer.from("bad-source"));
+
+    await integration.ensure(session.uploadId, true);
+
+    assert.equal(project.files.length, 0);
+    assert.equal(repository.get(session.uploadId)?.integrationError?.stage, "adopt");
+});
+
+test("re-dispatches a processing file after restart without creating another project record", async () => {
+    const { repository, service, project, integration, dispatches, dispatched } = fixture();
+    const session = await finalizedSession(service, Buffer.from("e57-source"));
+    await integration.ensure(session.uploadId);
+    project.files[0]!.status = "processing";
+    dispatched.clear(); // In-memory controller state is lost when the server restarts.
+
+    await integration.ensure(session.uploadId, true);
+
+    assert.equal(project.files.length, 1);
+    assert.deepEqual(dispatches, [session.reservedFileId, session.reservedFileId]);
+    assert.equal(repository.get(session.uploadId)?.integrationStage, "dispatched");
+});
+
+test("reconciles a persisted project record when the session manifest missed registration", async () => {
+    const { root, repository, service, project, integration, dispatches } = fixture();
+    const bytes = Buffer.from("ifc-source");
+    const session = await finalizedSession(service, bytes, "ifc");
+    const destination = path.join(root, "projects", project.id, "uploads", `${session.reservedFileId}.ifc`);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.renameSync(repository.getFinalizedArtifactPath(session), destination);
+    project.files.push({
+        id: session.reservedFileId,
+        revision: 1,
+        originalName: session.filename,
+        kind: "ifc",
+        status: "queued",
+    });
+
+    await integration.ensure(session.uploadId, true);
+
+    assert.equal(project.files.length, 1);
+    assert.equal(repository.get(session.uploadId)?.projectFileId, session.reservedFileId);
     assert.deepEqual(dispatches, [session.reservedFileId]);
 });
 

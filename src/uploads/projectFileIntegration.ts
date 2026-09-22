@@ -167,6 +167,17 @@ export class ProjectFileIntegrationService {
     private async adoptCanonicalSource(session: UploadSessionRecord, destinationPath: string): Promise<UploadSessionRecord> {
         const stagedPath = this.options.repository.getFinalizedArtifactPath(session);
         fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+        if (session.projectFileId) {
+            if (session.projectFileId !== session.reservedFileId) {
+                throw new Error("Registered project file identity does not match the upload reservation.");
+            }
+            if (!fs.existsSync(destinationPath) || fs.statSync(destinationPath).size !== session.finalBytes) {
+                throw new Error("Registered canonical project source is missing or has an unexpected size.");
+            }
+            // The source was already verified at finalization or during crash
+            // reconciliation. Rehashing it on every status poll is unnecessary.
+            return session;
+        }
         let current = this.persist(session, { integrationStage: "adopting", clearIntegrationError: true });
 
         if (fs.existsSync(destinationPath)) {

@@ -1035,7 +1035,9 @@ Before the atomic move, the session persists `integrationStage: "adopting"`.
 If a process stops after the move but before the project JSON write, recovery
 recognizes the pre-existing canonical path, streams it once to compare its
 trusted final SHA-256, then creates the same reserved-ID record. Normal moves
-do not rehash or copy the multi-gigabyte source.
+do not rehash or copy the multi-gigabyte source. Once `projectFileId` is
+durable, repeated status polls verify canonical source existence and byte
+length without rehashing the multi-gigabyte file.
 
 After registration, the session stores `projectFileId`, `registeredAt`, a safe
 `finalAsset` reference and, when applicable, `processingStartedAt`. These are
@@ -1046,7 +1048,9 @@ project file without invalidating the uploaded source.
 Completed upload sessions are reconciled at server startup and on later GET or
 complete calls. The in-process conversion-controller guard prevents duplicate
 dispatch inside a running server; a queued durable project file may safely be
-dispatched again after a process restart.
+dispatched again after a process restart. A file left in `processing` after a
+crash is also resumed when there is no live in-process controller; existing
+revision and cancellation checks remain authoritative.
 
 ### Storage ownership
 

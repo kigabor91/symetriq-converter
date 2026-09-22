@@ -1239,7 +1239,10 @@ function dispatchProjectFileProcessing(
     const stored = readProjects()
         .find((project) => project.id === projectId)
         ?.files.find((candidate) => candidate.id === file.id);
-    if (!stored || stored.status !== "queued" || conversionControllers.has(key)) return false;
+    // A previous process may have stopped after marking the file processing.
+    // The controller is in-memory, so its absence permits safe restart recovery.
+    if (!stored || (stored.status !== "queued" && stored.status !== "processing")
+        || stored.revision !== revision || conversionControllers.has(key)) return false;
     if (file.kind === "ifc") {
         queueIfcConversion(projectId, file.id, inputPath, revision);
     } else {
