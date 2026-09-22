@@ -124,6 +124,13 @@ test("adopts a finalized resumable E57 into one canonical project file and dispa
     assert.equal(project.files.length, 1);
     assert.deepEqual(dispatches, [session.reservedFileId]);
     assert.equal(repository.get(session.uploadId)?.integrationStage, "dispatched");
+
+    // Older status polls could regress this marker while preserving the
+    // authoritative processingStartedAt timestamp. Recovery repairs it.
+    const regressed = repository.get(session.uploadId)!;
+    repository.save({ ...regressed, integrationStage: "registered" });
+    await integration.ensure(session.uploadId, true);
+    assert.equal(repository.get(session.uploadId)?.integrationStage, "dispatched");
 });
 
 test("reconciles a crash after atomic move but before ProjectFileRecord persistence", async () => {
