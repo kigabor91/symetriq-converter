@@ -13,6 +13,7 @@ import { UploadSessionRepository } from "./uploads/uploadSessionRepository.js";
 import { ProjectFileIntegrationService } from "./uploads/projectFileIntegration.js";
 import { createUploadSessionRouter } from "./uploads/uploadSessionRoutes.js";
 import { UploadSessionService } from "./uploads/uploadSessionService.js";
+import { UploadSessionCleanupService, DEFAULT_UPLOAD_CLEANUP_INTERVAL_MS } from "./uploads/uploadSessionCleanupService.js";
 import {
     cleanupUploadFiles,
     LARGE_UPLOAD_REQUEST_TIMEOUT_MS,
@@ -1264,7 +1265,27 @@ resumableProjectFileIntegration = new ProjectFileIntegrationService({
     ),
     dispatchProjectFileProcessing,
 });
-resumableProjectFileIntegration.recoverCompleted();
+const uploadCleanupIntervalMinutes = Number(
+    process.env.SYMETRIQ_UPLOAD_CLEANUP_INTERVAL_MINUTES ?? DEFAULT_UPLOAD_CLEANUP_INTERVAL_MS / 60_000,
+);
+if (!Number.isSafeInteger(uploadCleanupIntervalMinutes) || uploadCleanupIntervalMinutes < 1) {
+    throw new Error("SYMETRIQ_UPLOAD_CLEANUP_INTERVAL_MINUTES must be a positive integer.");
+}
+const uploadSessionCleanup = new UploadSessionCleanupService({
+    repository: uploadSessionRepository,
+    sessions: uploadSessionService,
+    getProject: (projectId) => readProjects().find((project) => project.id === projectId),
+    getProjectDirectory,
+});
+// Reconcile completed transport handoffs before the first sweep. Finalizing
+// sessions remain protected and recover lazily through the existing service.
+void resumableProjectFileIntegration.recoverCompleted()
+    .then(() => uploadSessionCleanup.sweep())
+    .catch((error) => console.error("[Upload cleanup startup failure]", error));
+const uploadCleanupTimer = setInterval(() => {
+    void uploadSessionCleanup.sweep().catch((error) => console.error("[Upload cleanup periodic failure]", error));
+}, uploadCleanupIntervalMinutes * 60_000);
+uploadCleanupTimer.unref();
 
 app.post(
     "/api/projects/:projectId/files",

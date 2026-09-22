@@ -118,7 +118,7 @@ export function parseUploadSessionRecord(value: unknown, expectedUploadId?: stri
     if (value.projectFileId !== undefined && (typeof value.projectFileId !== "string" || !uploadIdPattern.test(value.projectFileId))) {
         throw new Error("Upload session project file ID is invalid.");
     }
-    for (const timestampField of ["registeredAt", "processingStartedAt"] as const) {
+    for (const timestampField of ["registeredAt", "processingStartedAt", "temporaryDataCleanupStartedAt", "temporaryDataCleanedAt"] as const) {
         if (value[timestampField] !== undefined && !validTimestamp(value[timestampField])) {
             throw new Error(`Upload session ${timestampField} is invalid.`);
         }
@@ -277,6 +277,8 @@ export class UploadSessionRepository {
     }
 
     assertCommittedPartStorage(session: UploadSessionRecord): void {
+        if (session.status === "expired" || session.status === "cancelled"
+            || session.temporaryDataCleanupStartedAt) return;
         const partsDirectory = this.getPartsDirectory(session.uploadId);
         const expected = new Map(session.parts.map((part) => [this.partFilename(part.partNumber), part]));
         if (!fs.existsSync(partsDirectory)) {

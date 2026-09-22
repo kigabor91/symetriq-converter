@@ -316,6 +316,7 @@ export class UploadSessionService {
     private readonly onTransportFinalized?: UploadSessionServiceOptions["onTransportFinalized"];
     private readonly sessionLockTails = new Map<string, Promise<void>>();
     private readonly finalizationTasks = new Map<string, Promise<void>>();
+    private readonly activePartStreams = new Map<string, number>();
 
     constructor(
         private readonly repository: UploadSessionRepository,
@@ -527,6 +528,18 @@ export class UploadSessionService {
 
     async uploadPart(input: UploadPartInput): Promise<UploadPartResult> {
         const uploadId = requiredString(input.uploadId, "uploadId");
+        this.activePartStreams.set(uploadId, (this.activePartStreams.get(uploadId) ?? 0) + 1);
+        try {
+            return await this.uploadPartInternal(input);
+        } finally {
+            const remaining = (this.activePartStreams.get(uploadId) ?? 1) - 1;
+            if (remaining > 0) this.activePartStreams.set(uploadId, remaining);
+            else this.activePartStreams.delete(uploadId);
+        }
+    }
+
+    private async uploadPartInternal(input: UploadPartInput): Promise<UploadPartResult> {
+        const uploadId = requiredString(input.uploadId, "uploadId");
         const startingSession = this.getSession(uploadId);
         isActiveSession(startingSession, this.now());
         const partNumber = validatePartNumber(input.partNumber, startingSession.totalParts);
@@ -619,6 +632,16 @@ export class UploadSessionService {
             this.log("cancelled", updated);
             return updated;
         });
+    }
+
+    /** Shares the same per-session lock as part commits, finalization and cancellation. */
+    withMaintenanceLock<T>(uploadId: string, action: () => Promise<T>): Promise<T> {
+        return this.withSessionLock(uploadId, action);
+    }
+
+    hasActiveTransfer(uploadId: string): boolean {
+        return (this.activePartStreams.get(uploadId) ?? 0) > 0
+            || this.finalizationTasks.has(uploadId);
     }
 
     private assertCompletePartSet(session: UploadSessionRecord): void {

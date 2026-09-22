@@ -73,12 +73,12 @@ export class ProjectFileIntegrationService {
         return task;
     }
 
-    recoverCompleted(): void {
+    recoverCompleted(): Promise<void> {
         const uploadIds = this.options.repository.listCompletedUploadIds();
         if (uploadIds.length > 0) {
             this.logger.info(`[Upload integration recovery discovered] count=${uploadIds.length}`);
         }
-        uploadIds.forEach((uploadId) => { void this.ensure(uploadId, true); });
+        return Promise.all(uploadIds.map((uploadId) => this.ensure(uploadId, true))).then(() => undefined);
     }
 
     private async integrate(uploadId: string, recovered: boolean): Promise<void> {

@@ -202,7 +202,7 @@ test("reloads an identical session from a fresh repository and service", () => {
     assert.deepEqual(restartedService.getSession(original.uploadId), original);
 });
 
-test("GET remains read-only after expiresAt until the cleanup sprint transitions state", () => {
+test("GET remains read-only after expiresAt until a maintenance sweep transitions state", () => {
     const { root, service } = createFixture();
     const original = service.createSession(validInput()).session;
     const laterService = new UploadSessionService(

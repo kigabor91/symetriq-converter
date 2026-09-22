@@ -2,7 +2,7 @@
 
 **Repository:** `symetriq-converter`  
 **Sprint type:** architecture, contract and benchmark design only  
-**Status:** **R2B.5 implemented – resumable transport now converges into the canonical project-file pipeline**
+**Status:** **R2B.6 implemented – resumable transport, project integration and lifecycle cleanup**
 
 ## 1. Executive decision
 
@@ -1061,3 +1061,107 @@ revision and cancellation checks remain authoritative.
 - immutable session parts and `session.json` remain temporarily for R2B.6
   retention/cleanup and reconciliation. They are not deleted before project
   registration is durable.
+
+## 30. R2B.6 expiry, cleanup and storage ownership
+
+The upload session is a transport record, not the permanent project asset.
+`UploadSessionCleanupService` scans once after completed-session reconciliation
+at startup and then every 60 minutes by default. Set
+`SYMETRIQ_UPLOAD_CLEANUP_INTERVAL_MINUTES` to a positive integer to change the
+interval. The service serializes maintenance with part commits, cancellation
+and finalization for each session; active streams and finalizers are skipped.
+Only one backend instance should own a data root at a time. Multiple processes
+sharing the same `data/` tree are not a supported cleanup deployment.
+
+| Storage | Owner | Cleanup rule |
+| --- | --- | --- |
+| `upload-sessions/<uploadId>/session.json` | transport | Keep as status/idempotency tombstone for 30 days after safe byte cleanup, then purge only if its directory contains no unknown data. |
+| `parts/*.part` | transport | Preserve for active/finalizing/retryable sessions. Delete after incomplete expiry, cancellation, non-retryable failure retention, or proven canonical registration. |
+| `parts/.*.tmp`, `session.json.*.tmp` | transport | Delete only known-pattern files older than 24 hours in a valid, inactive session. |
+| `finalizing/assembly.tmp` | transport | Protect during finalization; delete only after safe terminal cleanup or when stale and inactive. |
+| `finalized/<reservedFileId>.<ext>` | transport | Preserve until the canonical project source and record are verified. Normal handoff atomically moves it, leaving no duplicate. |
+| `data/projects/<projectId>/uploads/<fileId>.<ext>` | project | Permanent canonical source; cleanup reads its existence and size but never deletes or modifies it. |
+| `data/projects/<projectId>/converted/...` | project processor | Never managed by upload cleanup. |
+
+Eligibility is intentionally conservative:
+
+| Durable status | Behavior |
+| --- | --- |
+| `created` / `uploading` past `expiresAt` | Persist `expired`, then reclaim known temporary bytes. A successful part refreshes the 72-hour inactivity deadline. |
+| `cancelled` | Retry temporary cleanup; retain a small tombstone. |
+| `failed`, retryable | Keep parts and finalization recovery data. |
+| `failed`, non-retryable | Keep for seven days after failure, then reclaim known temporary bytes. |
+| `finalizing` | Preserve all recovery data, even if its old upload deadline passed. |
+| `complete`, not registered | Preserve finalized artifact and parts for project-registration recovery. |
+| `complete`, registered | Reclaim session bytes only after matching project/file IDs, filename, kind, source existence and exact byte length are durably confirmed. |
+
+The cleanup intent is persisted before deleting any committed part. A failed or
+interrupted deletion is retried on the next sweep; GET can still return the
+session state after byte cleanup. Session tombstones are retained 30 days from
+successful cleanup. Unknown files and malformed/orphan session directories are
+logged and preserved, not swept by a recursive wildcard. No full-file hash is
+required for the normal atomic-move handoff; the finalization SHA-256 remains
+the trusted integrity record. A direct one-off hash remains useful for audit.
+
+For the 2,392,271,872-byte E57 baseline, the 36 immutable parts alone use
+2,392,271,872 bytes. The canonical source and derivatives must remain after
+that temporary footprint is reclaimed. The session manifest, point-cloud
+outputs and panorama files are not part of the reclaimed byte count.
+
+### Legacy multipart and production proxy policy
+
+The legacy multipart project-file route remains for compatibility and small
+files; it is not removed by R2B.6. The resumable route should be the preferred
+future path for **all** project-file sizes so only one client transport needs
+long-term maintenance and future object storage can replace the session-file
+backend without changing processing. Migration/removal of the legacy route is
+a separate change after production clients have moved.
+
+The current Viewer IIS `web.config` still allows the legacy 4-GiB-class
+single request (`maxAllowedContentLength=4294967295`). Resumable PUT requests
+are bounded by the server-selected 64 MiB chunk size; an 80–128 MiB IIS/ARR
+request limit leaves practical headroom. The multi-GB single-request limit is
+not required by resumable upload, but should not be reduced while large legacy
+multipart clients remain in use. ARR request timeout must cover one chunk,
+not the subsequent E57 conversion, which runs after transport finalization.
+
+### R2 validation baseline and remaining manual checks
+
+The first real 2,392,271,872-byte E57 transport produced 36/36 parts and a
+verified final SHA-256. R2B.5 then atomically moved it to canonical project
+storage, created exactly one reserved-ID project record and produced two LAS
+detail variants plus 415 panorama stations. The project reached `ready` and
+the Fast LAS URL returned HTTP 200. Because registration was deliberately
+performed hours after the original transport while R2B.5 was being built,
+those timestamps do **not** form a valid single-run end-to-end throughput
+benchmark. Viewer visual alignment, a fresh full-run throughput benchmark and
+manual interruption/resume evidence must be reported separately rather than
+inferred from these artifacts.
+
+On 2026-09-22 the backend on port 3101 was restarted on current code. Its
+startup reconciliation ran before cleanup. The startup sweep reclaimed exactly
+2,392,271,872 bytes of immutable E57 parts from the completed, registered
+session, with zero cleanup failures. Its small `complete` session manifest
+remained readable; the canonical 2,392,271,872-byte source and its original
+SHA-256 matched, the single project-file record remained `ready`, and the
+generated outputs still contained two point-cloud variants and 415 stations.
+
+The Viewer loaded the existing processed E57: the point cloud was visible,
+both Fast and Very fast variants rendered, panorama markers appeared, and an
+outdoor station panorama opened. The point cloud's broad spatial coverage
+looked plausible. Exact IFC-to-cloud alignment was not established by that
+visual inspection; coordinate integrity remains covered separately by the
+numerical E57 audit.
+
+A fresh small IFC was also sent through the Viewer's resumable test uploader
+into a dedicated validation project. It completed 1/1 parts, finalized,
+created one project-file record, processed to `ready`, and exposed XKT and
+metadata URLs. This validates the same transport-to-processor route for IFC.
+
+The large E57 upload itself was completed before R2B.6 and the subsequent
+project registration was performed hours later during R2B.5 development.
+Therefore upload duration, throughput, finalization duration, processing
+duration, total single-run E2E duration, and a manual interruption/resume
+result are **not measured** for the current code. A new uninterrupted large
+Viewer upload plus an intentional restart/resume test remain release checks;
+the earlier successful E57 result must not be reported as that test.

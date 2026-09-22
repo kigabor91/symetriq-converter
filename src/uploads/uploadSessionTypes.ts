@@ -72,6 +72,9 @@ export interface UploadSessionRecord {
     registeredAt?: string;
     processingStartedAt?: string;
     integrationError?: UploadIntegrationError;
+    /** Durable intent: committed parts may be absent after this point. */
+    temporaryDataCleanupStartedAt?: string;
+    temporaryDataCleanedAt?: string;
     error?: { code: string; message: string; retryable: boolean };
 }
 
