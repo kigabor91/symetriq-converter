@@ -1165,3 +1165,106 @@ duration, total single-run E2E duration, and a manual interruption/resume
 result are **not measured** for the current code. A new uninterrupted large
 Viewer upload plus an intentional restart/resume test remain release checks;
 the earlier successful E57 result must not be reported as that test.
+
+## 31. R2 Production Validation Closure (2026-09-23)
+
+R2B.6V used backend commit `9f90fb2` on `localhost:3101`, restarted from
+`C:\Development\symetriq-converter`, and the local Viewer dev server on
+`127.0.0.1:5173` (Vite proxy target `localhost:3101`). This was a local
+production-path validation, **not** a deployed IIS/ARR throughput test. No
+upload or conversion code was changed during validation.
+
+### Fresh uninterrupted large E57
+
+The Viewer uploaded the original `LIDL_HSTAD_50mm_20260916.e57` into isolated
+project `20a25ec8-3fd9-4663-8d44-3fa9330b5139` as new upload
+`7826295f-834a-45b0-afe1-8865f8f4dbd7` and reserved file
+`52f85441-5b4d-482b-a598-22ebab8ef0ae`. The source was
+2,392,271,872 bytes, the server-selected chunk size 67,108,864 bytes
+(64 MiB), and all 36 parts were durably committed. The final part was a
+partial chunk. Browser Network evidence showed one successful create request,
+the 36 part requests, and completion; no failed part/retry was observed in
+this uninterrupted run.
+
+| Metric | Evidence/result |
+| --- | --- |
+| Server session created | 07:51:49.999 UTC |
+| Last part committed | 07:52:06.271 UTC |
+| Upload duration | 16.272 s, measured from durable session creation to last committed part |
+| Average upload throughput | 147.0 MB/s, with 1 MB = 1,000,000 bytes; local source and backend |
+| Finalization completed | 07:52:16.251 UTC; 9.980 s after last part |
+| Project registration | 07:52:16.284 UTC; 33 ms after finalization |
+| Processing dispatched | 07:52:16.293 UTC |
+| Last generated panorama face written | 07:55:41.467 UTC; 205.2 s after dispatch |
+| End-to-end to last derivative | about 231.5 s (3m 51.5s) from session creation; exact `ready` transition time is not persisted |
+| Final bytes / SHA-256 | 2,392,271,872 / `b725ddd9144bc741daa1ff29a22579ebc768fdfb2750113f95e5f4d6ac959ad4` |
+| Final project state | one reserved-ID ProjectFileRecord, `ready`; two LAS detail variants and 415 panorama stations |
+
+The final SHA-256 equals the independently established hash of the earlier
+copy of the same E57. The user reported a stopwatch value of 8 s for
+"Finalized successfully" and 3m 26s from upload start to `ready`. Those
+values do not align exactly with the persisted server timestamps (26.252 s
+from session creation to finalization and 231.5 s to the last derivative).
+They are kept as user-observed timings, not substituted for server phase
+measurements. The exact `ready` transition is not timestamped independently.
+
+The user opened the **new** project Scene and confirmed that the point cloud,
+available detail variants and panorama images rendered correctly. The 415
+station markers were present, and panorama navigation worked. The point-cloud
+thinning pattern appears visually sliced and movement can appear to jitter;
+these are deferred point-cloud quality/rendering investigations, not upload
+integrity failures. No matching IFC was placed in this isolated project, so
+IFC-to-cloud visual alignment was **not testable** in this validation.
+
+### Manual interruption, page reload and backend restart
+
+A separate Viewer upload of the same source used isolated project
+`797e44da-fbe1-4a01-a612-c89b886cf357`, upload
+`b9f8382a-3206-473f-9d47-8d69515583e9`, and reserved file
+`71d88aad-89e4-4d6e-ba6b-f107cc77e9e9`. Chrome Network was switched
+offline after parts 0–11 completed. The browser displayed 12/36 parts and
+paused/recoverable state. Before restart, the server GET and disk both showed
+exactly 12 immutable parts totaling 805,306,368 bytes; no ProjectFileRecord
+existed yet. The backend was stopped and restarted on the same commit/data
+root. After restart, GET returned the **same** uploadId, uploaded parts 0–11,
+received byte count and `uploading` state, with no manifest corruption.
+
+The user restored the browser network, reloaded the page, reselected the same
+file and resumed. Server logs after restart show part starts only for 12–35;
+the already committed 0–11 were not re-uploaded. The one session finalized
+with the same full-file SHA-256 as the uninterrupted test. Exactly one
+reserved-ID ProjectFileRecord was registered and processed to `ready`, with
+two point-cloud variants and 415 panorama stations. The user confirmed the
+resumed result's point cloud and panoramas rendered in the Viewer. There was
+no duplicate session, authoritative part, canonical source, project file or
+concurrent processor observed. A restart **during finalization itself** was
+not manually staged; R2B.3 automated recovery tests remain the evidence for
+that narrower timing window.
+
+### Cleanup and regressions
+
+At registration the resumed session still held 36 parts totaling
+2,392,271,872 temporary bytes, in addition to the canonical source. After
+`ready`, a safe backend restart ran integration reconciliation before the
+startup cleanup sweep. It reclaimed exactly 2,392,271,872 temporary bytes
+with zero failures. The small `complete` session tombstone remained; part
+files were gone; the canonical source still existed at the same exact byte
+length; the single project record remained `ready`; and the 415 panorama
+stations remained. The same cleanup result had already been observed for
+the fresh uninterrupted run. Neither cleanup touched project-owned files.
+
+The earlier small IFC resumable validation project still has one `ready`
+ProjectFileRecord, and its XKT and metadata URLs returned HTTP 200 after
+the restarts. The legacy multipart route remains for compatibility; the
+recommended future unified transport remains resumable upload. In this local
+validation each request was bounded to a 64 MiB chunk, so no >2 GiB request
+body was required. The actual deployed IIS/ARR limit was not exercised here;
+the 80–128 MiB recommendation above remains a deployment check. Browser
+memory was assessed qualitatively through responsive UI and successful
+completion, not by a numeric heap profile.
+
+R2B.6V functional result: **PASS** for the current local Viewer/backend path.
+The R2 resumable-upload implementation can be closed on this evidence, with
+deployed IIS/ARR verification, exact `ready` timestamp instrumentation,
+point-cloud visual-quality work and manual finalization-window interruption
+tracked separately rather than silently claimed as tested.
