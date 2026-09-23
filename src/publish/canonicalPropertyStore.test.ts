@@ -47,7 +47,7 @@ test("canonical property store deduplicates Revit definitions, values and proper
         assert.equal(stats.analysis.typePropertyCount, 1);
         assert.equal(stats.analysis.topFrequentProperties[0]?.name, "Asset Code");
         assert.ok(stats.databaseBytes > 0);
-        assert.deepEqual(store.getFacetValues(databasePath, "category"), ["Ducts", "Pipes"]);
+        assert.equal(stats.storeVersion, 3);
         assert.deepEqual(store.getPropertyDefinitions(databasePath).slice(0, 2), [
             { propertyDefinitionId: "canonical:instance:shared:asset", propertySetName: "Instance Parameters", displayName: "Asset Code", valueType: "String", unit: null, scope: "instance" },
             { propertyDefinitionId: "canonical:type:bip:diameter", propertySetName: "Type Parameters", displayName: "Diameter", valueType: "Double", unit: "millimeters", scope: "type" },

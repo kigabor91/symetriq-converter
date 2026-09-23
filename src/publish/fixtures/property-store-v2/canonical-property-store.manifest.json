@@ -1,0 +1,72 @@
+{
+  "storeVersion": 2,
+  "sourceKind": "revit",
+  "sourceBytes": 1891,
+  "viewerBootstrapBytes": 0,
+  "databaseBytes": 102400,
+  "processingMilliseconds": 19.9543,
+  "heapUsedDeltaBytes": 205976,
+  "rssDeltaBytes": 1789952,
+  "definitions": 4,
+  "propertyValues": 5,
+  "propertySets": 3,
+  "types": 1,
+  "elements": 2,
+  "renderObjects": 2,
+  "levels": 0,
+  "analysis": {
+    "definitionCount": 4,
+    "uniquePropertyNames": 4,
+    "instancePropertyCount": 4,
+    "typePropertyCount": 2,
+    "topFrequentProperties": [
+      {
+        "parameterId": "shared:status",
+        "name": "Status",
+        "occurrences": 3,
+        "sourceBytes": 56
+      },
+      {
+        "parameterId": "shared:asset",
+        "name": "Asset Code",
+        "occurrences": 2,
+        "sourceBytes": 12
+      },
+      {
+        "parameterId": "bip:diameter",
+        "name": "Diameter",
+        "occurrences": 1,
+        "sourceBytes": 9
+      }
+    ],
+    "topLargestProperties": [
+      {
+        "parameterId": "shared:status",
+        "name": "Status",
+        "occurrences": 3,
+        "sourceBytes": 56
+      },
+      {
+        "parameterId": "shared:asset",
+        "name": "Asset Code",
+        "occurrences": 2,
+        "sourceBytes": 12
+      },
+      {
+        "parameterId": "bip:diameter",
+        "name": "Diameter",
+        "occurrences": 1,
+        "sourceBytes": 9
+      }
+    ],
+    "uniquePropertyValues": 5,
+    "sqlite": {
+      "pageSize": 4096,
+      "pageCount": 25,
+      "freelistPages": 0,
+      "dataBytes": 40960,
+      "indexBytes": 57344,
+      "otherBytes": 4096
+    }
+  }
+}

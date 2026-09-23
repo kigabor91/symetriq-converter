@@ -1,5 +1,9 @@
 # Canonical Property Store
 
+The current internal Store schema is **v3**. See the [Sprint 008 implementation
+report](property-store-sprint008-implementation.md) for measured size, query
+performance and v2 read compatibility. Canonical Viewer metadata remains v2.
+
 ## Purpose
 
 The Hub preserves the complete producer-owned `source-metadata.json`, while
@@ -42,7 +46,7 @@ The Store is a SQLite database with these normalized relations:
 
 | Table | Purpose | Deduplication key |
 |---|---|---|
-| `property_definitions` | Revit definition identity, source, scope, storage/spec/unit metadata | `parameter_id` |
+| `property_definitions` | Definition identity, source, storage/spec/unit metadata and actual-use scope mask | `parameter_id` |
 | `property_values` | Raw JSON value plus formatted display value | definition + raw JSON + display value |
 | `property_sets` | Ordered-independent collection of property values | scope + sorted value-ID signature |
 | `property_set_values` | Many-to-many property set / value membership | pair of IDs |
@@ -50,14 +54,17 @@ The Store is a SQLite database with these normalized relations:
 | `elements` | Logical/render identity plus compact category/family/type and instance property-set reference | logical ID / source element ID |
 | `render_objects` | Publish Package v1 render ID, logical element and current Viewer/XKT object-ID bridge | `render_object_id` |
 | `levels` | Reserved canonical spatial level relation | `level_id` |
-| `definition_value_index` | Definition → unique value index for future property search/filter | definition + value ID |
-| `facet_index` | Category, family and type → element identity index | facet + value + element |
+
+New v3 Stores have no `facet_index`; Category, Family and Type canonical queries
+use the columns in `elements`. `property_values_definition_idx` and
+`property_set_values_value_idx` support definition/value matching. Published v2
+Stores retain their old physical tables and remain readable.
 
 The Source Metadata already stores one definition per document and one type
 value set per Revit type. The Store keeps those boundaries and additionally
 deduplicates equal property values and equal instance/type property sets.
-Property value IDs and property-set IDs are content-addressed SHA-256 IDs, so
-deduplication does not depend on source ordering.
+Property value IDs and property-set IDs are compact integer keys. Property-set
+deduplication uses a fixed SHA-256 signature of its sorted value IDs and scope.
 
 ## Viewer bootstrap projection
 
@@ -132,26 +139,26 @@ is the internal retrieval seam. It returns one element's full property set:
 }
 ```
 
-This is an internal API only. A future REST endpoint can expose it per selected
-element without downloading the entire Store or changing the Viewer metadata
-contract.
+The Hub exposes one selected element through the canonical on-demand
+`/api/projects/{projectId}/models/{modelId}/render-objects/{renderObjectId}/properties`
+endpoint without downloading the Store into the Viewer bootstrap.
 
 ## Property index and future queries
 
 The Store already persists the relationships required for later search and
 filter features:
 
-- `facet_index` supports category, family and type value discovery;
-- `definition_value_index` supports parameter-definition/value discovery;
+- `elements.category`, `elements.family` and `elements.type_name` support the
+  source-neutral Category, Family and Type facet queries;
+- `property_values_definition_idx` and `property_set_values_value_idx` support
+  parameter-definition/value discovery and reverse matching;
 - joins from `elements` through instance property sets and type property sets
   support element lookup for a selected property value.
 
-System filtering is intentionally not inferred from localised Revit parameter
-names in this sprint. It can be added as a Hub-owned semantic mapping that
-indexes selected parameter definitions into a `system` facet.
-
-No REST endpoint, Viewer UI, property search, or property filter is implemented
-by this sprint.
+System Name can be queried as a canonical property definition, without a
+Revit-specific Viewer branch. The Canonical Query API serves definition values
+and matching render IDs on demand; the full source property set is not part of
+bootstrap metadata.
 
 ## Performance measurement
 

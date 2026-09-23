@@ -1,5 +1,10 @@
 # Sprint 007 — Property Store targeted performance audit
 
+> Sprint 008 implemented and measured the two selected changes. See
+> [Property Store Sprint 008 implementation report](property-store-sprint008-implementation.md)
+> for production-build measurements and v2 compatibility evidence. The figures
+> below are the pre-implementation audit baseline and disposable prototypes.
+
 ## Decision
 
 **GO: a narrowly scoped Sprint 008 is justified.** Current Store v2 is already compact: the historical ~3.15-GB Store v1 is not the current architecture. The remaining confirmed outlier is the first property-definition catalogue request on a large Revit model: **2,739.70 ms warm median**, compared with 4.29 ms for an experimentally materialized *actual-use scope* bitmask on a disposable database copy. Opening Visible Properties, Filter or Display Colour requests this catalogue, so the delay is user-facing, though it does **not** block initial scene loading. A second, independently proven cleanup can remove the production-unused `facet_index` table and index, saving **44,163,072 bytes (16.08%)** without changing the tested public results. Neither change is implemented here.

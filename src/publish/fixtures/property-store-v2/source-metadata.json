@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "sourceKind": "revit",
+  "parameterDefinitions": [
+    { "parameterId": "shared:asset", "name": "Asset Code", "scopes": ["instance"], "source": "shared", "storageType": "String" },
+    { "parameterId": "bip:diameter", "name": "Diameter", "scopes": ["type"], "source": "builtIn", "storageType": "Double", "unitTypeId": "millimeters" },
+    { "parameterId": "shared:status", "name": "Status", "scopes": ["instance", "type"], "source": "shared", "storageType": "String" },
+    { "parameterId": "shared:unused", "name": "Unused", "scopes": ["instance", "type"], "source": "shared", "storageType": "String" }
+  ],
+  "types": [
+    {
+      "typeId": "type:pipe",
+      "sourceTypeId": "source-type-pipe",
+      "familyName": "Pipe Family",
+      "name": "DN100",
+      "parameterValues": [
+        { "parameterId": "bip:diameter", "rawValue": 0.1, "displayValue": "100 mm" },
+        { "parameterId": "shared:status", "rawValue": "By Type", "displayValue": "By Type" }
+      ]
+    }
+  ],
+  "elements": [
+    {
+      "logicalElementId": "logical-pipe-1",
+      "sourceElementId": "source-pipe-1",
+      "typeId": "type:pipe",
+      "category": "Pipes",
+      "family": "Pipe Family",
+      "type": "DN100",
+      "instanceParameterValues": [
+        { "parameterId": "shared:asset", "rawValue": "P-01", "displayValue": "P-01" },
+        { "parameterId": "shared:status", "rawValue": "Installed", "displayValue": "Installed" }
+      ]
+    },
+    {
+      "logicalElementId": "logical-pipe-2",
+      "sourceElementId": "source-pipe-2",
+      "typeId": "type:pipe",
+      "category": "Pipes",
+      "family": "Pipe Family",
+      "type": "DN100",
+      "instanceParameterValues": [
+        { "parameterId": "shared:asset", "rawValue": "", "displayValue": "" },
+        { "parameterId": "shared:status", "rawValue": "Installed", "displayValue": "Installed" }
+      ]
+    }
+  ]
+}

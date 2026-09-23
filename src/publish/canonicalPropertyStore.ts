@@ -12,7 +12,7 @@ export interface CanonicalPropertyStoreAnalysis {
     sqlite: { pageSize: number; pageCount: number; freelistPages: number; dataBytes: number; indexBytes: number; otherBytes: number };
 }
 export interface CanonicalPropertyStoreStats {
-    storeVersion: 2; sourceKind: "revit"; sourceBytes: number; viewerBootstrapBytes: number; databaseBytes: number;
+    storeVersion: 3; sourceKind: "revit"; sourceBytes: number; viewerBootstrapBytes: number; databaseBytes: number;
     processingMilliseconds: number; heapUsedDeltaBytes: number; rssDeltaBytes: number;
     definitions: number; propertyValues: number; propertySets: number; types: number; elements: number; renderObjects: number; levels: number;
     analysis: CanonicalPropertyStoreAnalysis;
@@ -62,11 +62,40 @@ function pageUsage(database: DatabaseSync): CanonicalPropertyStoreAnalysis["sqli
     const freelistPages = Number((database.prepare("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count);
     try {
         const rows = database.prepare("SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name").all() as Array<{ name: string; bytes: number }>;
-        const tables = new Set(["property_definitions", "string_dictionary", "property_values", "property_sets", "property_set_values", "types", "elements", "levels", "render_objects", "facet_index"]);
+        const tables = new Set(["property_definitions", "string_dictionary", "property_values", "property_sets", "property_set_values", "types", "elements", "levels", "render_objects"]);
         const dataBytes = rows.filter((row) => tables.has(row.name)).reduce((sum, row) => sum + Number(row.bytes), 0);
         const indexBytes = rows.filter((row) => !tables.has(row.name) && row.name !== "sqlite_schema").reduce((sum, row) => sum + Number(row.bytes), 0);
         return { pageSize, pageCount, freelistPages, dataBytes, indexBytes, otherBytes: Math.max(0, pageSize * pageCount - dataBytes - indexBytes) };
     } catch { return { pageSize, pageCount, freelistPages, dataBytes: 0, indexBytes: 0, otherBytes: pageSize * pageCount }; }
+}
+
+type ReadableStoreVersion = 2 | 3;
+
+/** Published v2 files have a v2 manifest and SQLite user_version=0; new v3 files persist both versions. */
+function openPropertyStore(databasePath: string): { database: DatabaseSync; version: ReadableStoreVersion } {
+    const manifestPath = path.join(path.dirname(databasePath), CanonicalPropertyStore.manifestFilename);
+    let manifest: unknown;
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown; }
+    catch (error) { throw new Error(`Property Store manifest is missing or invalid: ${manifestPath}`, { cause: error }); }
+    if (!manifest || typeof manifest !== "object") throw new Error(`Property Store manifest is invalid: ${manifestPath}`);
+    const { storeVersion, databaseBytes } = manifest as { storeVersion?: unknown; databaseBytes?: unknown };
+    if (storeVersion !== 2 && storeVersion !== 3) throw new Error(`Unsupported Property Store version: ${String(storeVersion)}`);
+    if (!Number.isSafeInteger(databaseBytes) || Number(databaseBytes) <= 0 || fs.statSync(databasePath).size !== databaseBytes) {
+        throw new Error(`Property Store manifest/database size mismatch: ${manifestPath}`);
+    }
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+        const sqliteVersion = Number((database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version);
+        if (sqliteVersion !== (storeVersion === 2 ? 0 : 3)) {
+            throw new Error(`Property Store manifest/SQLite version mismatch: manifest=${storeVersion}, SQLite=${sqliteVersion}`);
+        }
+        const columns = database.prepare("PRAGMA table_info(property_definitions)").all() as Array<{ name: string }>;
+        const hasUsageMask = columns.some((column) => column.name === "usage_mask");
+        if (columns.length === 0 || hasUsageMask !== (storeVersion === 3)) {
+            throw new Error(`Property Store definition schema does not match version ${storeVersion}`);
+        }
+        return { database, version: storeVersion };
+    } catch (error) { database.close(); throw error; }
 }
 
 function sourceAnalysis(source: RevitSourceMetadataV1): Omit<CanonicalPropertyStoreAnalysis, "uniquePropertyValues" | "sqlite"> {
@@ -102,14 +131,19 @@ export class CanonicalPropertyStore {
     build(source: RevitSourceMetadataV1, directory: string, sourceBytes: number, viewerBootstrapBytes = 0, objectMap?: PublishObjectMapV1): CanonicalPropertyStoreStats {
         fs.mkdirSync(directory, { recursive: true });
         const databasePath = path.join(directory, CanonicalPropertyStore.databaseFilename);
-        fs.rmSync(databasePath, { force: true });
+        const manifestPath = path.join(directory, CanonicalPropertyStore.manifestFilename);
+        const analysisPath = path.join(directory, CanonicalPropertyStore.analysisFilename);
+        if ([databasePath, manifestPath, analysisPath].some((artifact) => fs.existsSync(artifact))) {
+            throw new Error(`Property Store build destination already contains an artifact: ${directory}`);
+        }
         const before = process.memoryUsage();
         const startedAt = performance.now();
         const database = new DatabaseSync(databasePath);
+        let completed = false;
         try {
             database.exec(`
-                PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;
-                CREATE TABLE property_definitions (definition_key INTEGER PRIMARY KEY, parameter_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, scopes_json TEXT NOT NULL, source TEXT, built_in_parameter TEXT, shared_parameter_guid TEXT, parameter_group TEXT, storage_type TEXT, spec_type_id TEXT, unit_type_id TEXT, is_read_only INTEGER, is_visible INTEGER);
+                PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY; PRAGMA user_version = 3;
+                CREATE TABLE property_definitions (definition_key INTEGER PRIMARY KEY, parameter_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, scopes_json TEXT NOT NULL, source TEXT, built_in_parameter TEXT, shared_parameter_guid TEXT, parameter_group TEXT, storage_type TEXT, spec_type_id TEXT, unit_type_id TEXT, is_read_only INTEGER, is_visible INTEGER, usage_mask INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE string_dictionary (string_id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);
                 CREATE TABLE property_values (property_value_id INTEGER PRIMARY KEY, definition_key INTEGER NOT NULL REFERENCES property_definitions(definition_key), raw_value_json TEXT NOT NULL, display_string_id INTEGER REFERENCES string_dictionary(string_id), UNIQUE(definition_key, raw_value_json, display_string_id));
                 CREATE TABLE property_sets (property_set_id INTEGER PRIMARY KEY, scope TEXT NOT NULL, signature_hash BLOB NOT NULL UNIQUE);
@@ -118,19 +152,19 @@ export class CanonicalPropertyStore {
                 CREATE TABLE elements (logical_element_id TEXT PRIMARY KEY, source_element_id TEXT NOT NULL UNIQUE, type_id TEXT REFERENCES types(type_id), category TEXT NOT NULL, family TEXT, type_name TEXT, instance_property_set_id INTEGER NOT NULL REFERENCES property_sets(property_set_id));
                 CREATE TABLE levels (level_id TEXT PRIMARY KEY, name TEXT NOT NULL, elevation REAL NOT NULL, source TEXT NOT NULL, method TEXT NOT NULL);
                 CREATE TABLE render_objects (render_object_id TEXT PRIMARY KEY, logical_element_id TEXT NOT NULL REFERENCES elements(logical_element_id), source_element_id TEXT NOT NULL REFERENCES elements(source_element_id), viewer_object_id TEXT NOT NULL, source_type TEXT NOT NULL);
-                CREATE TABLE facet_index (facet TEXT NOT NULL, value TEXT NOT NULL, source_element_id TEXT NOT NULL REFERENCES elements(source_element_id), PRIMARY KEY(facet, value, source_element_id)) WITHOUT ROWID;
                 CREATE INDEX property_values_definition_idx ON property_values(definition_key);
                 CREATE INDEX property_set_values_value_idx ON property_set_values(property_value_id);
                 CREATE INDEX elements_type_idx ON elements(type_id);
                 CREATE INDEX render_objects_viewer_idx ON render_objects(viewer_object_id);
-                CREATE INDEX facet_index_lookup_idx ON facet_index(facet, value);
             `);
             const definitions = new Map(source.parameterDefinitions.map((definition) => [definition.parameterId, definition]));
             const definitionKeys = new Map<string, number>();
+            const usageMasks = new Map<string, number>();
             const stringIds = new Map<string, number>();
             const propertyValueIds = new Map<string, number>();
             const propertySetIds = new Map<string, number>();
-            const insertDefinition = database.prepare("INSERT INTO property_definitions VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            const insertDefinition = database.prepare("INSERT INTO property_definitions (parameter_id, name, scopes_json, source, built_in_parameter, shared_parameter_guid, parameter_group, storage_type, spec_type_id, unit_type_id, is_read_only, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            const updateDefinitionUsage = database.prepare("UPDATE property_definitions SET usage_mask = ? WHERE parameter_id = ?");
             const findDefinition = database.prepare("SELECT definition_key FROM property_definitions WHERE parameter_id = ?");
             const insertString = database.prepare("INSERT OR IGNORE INTO string_dictionary VALUES (NULL, ?)");
             const findString = database.prepare("SELECT string_id FROM string_dictionary WHERE value = ?");
@@ -142,7 +176,6 @@ export class CanonicalPropertyStore {
             const insertLevel = database.prepare("INSERT INTO levels VALUES (?, ?, ?, ?, ?)");
             const insertType = database.prepare("INSERT INTO types VALUES (?, ?, ?, ?, ?)");
             const insertElement = database.prepare("INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?)");
-            const insertFacet = database.prepare("INSERT OR IGNORE INTO facet_index VALUES (?, ?, ?)");
             const insertRenderObject = database.prepare("INSERT INTO render_objects VALUES (?, ?, ?, ?, ?)");
             database.exec("BEGIN");
             (source.levels ?? []).forEach((level) => insertLevel.run(level.id, level.name, level.elevation, level.source, level.method));
@@ -170,13 +203,15 @@ export class CanonicalPropertyStore {
                 const signatureHash = hash(`${scope}\u0000${valueIds.join(",")}`);
                 const key = signatureHash.toString("hex"); const cached = propertySetIds.get(key); if (cached !== undefined) return cached;
                 insertSet.run(scope, signatureHash); const id = Number((findSet.get(signatureHash) as { property_set_id: number }).property_set_id);
-                propertySetIds.set(key, id); valueIds.forEach((valueId) => insertSetValue.run(id, valueId)); return id;
+                propertySetIds.set(key, id);
+                const scopeBit = scope === "instance" ? 1 : 2;
+                values.forEach((value) => usageMasks.set(value.parameterId, (usageMasks.get(value.parameterId) ?? 0) | scopeBit));
+                valueIds.forEach((valueId) => insertSetValue.run(id, valueId)); return id;
             };
             source.types.forEach((type) => insertType.run(type.typeId, type.sourceTypeId, text(type.familyName), text(type.name), propertySetFor("type", type.parameterValues)));
             source.elements.forEach((element) => {
                 const propertySetId = propertySetFor("instance", element.instanceParameterValues);
                 insertElement.run(element.logicalElementId, element.sourceElementId, text(element.typeId), element.category ?? "Uncategorized", text(element.family), text(element.type), propertySetId);
-                ([ ["category", element.category], ["family", element.family], ["type", element.type] ] as const).forEach(([facet, value]) => { if (value) insertFacet.run(facet, value, element.sourceElementId); });
             });
             const sourceByLogicalId = new Map(source.elements.map((element) => [element.logicalElementId, element]));
             const renderObjects = objectMap?.renderObjects ?? source.elements.map((element) => ({ renderObjectId: `legacy:${element.sourceElementId}`, logicalElementId: element.logicalElementId, sourceElementId: element.sourceElementId, sourceType: "revit.element", geometry: { legacyNodeName: element.sourceElementId } }));
@@ -185,19 +220,26 @@ export class CanonicalPropertyStore {
                 if (!sourceElement || sourceElement.sourceElementId !== renderObject.sourceElementId) throw new Error(`Object map render object ${renderObject.renderObjectId} does not match source metadata.`);
                 insertRenderObject.run(renderObject.renderObjectId, renderObject.logicalElementId, renderObject.sourceElementId, renderObject.geometry?.legacyNodeName || renderObject.sourceElementId, renderObject.sourceType);
             });
+            usageMasks.forEach((mask, parameterId) => updateDefinitionUsage.run(mask, parameterId));
             database.exec("COMMIT"); database.exec("VACUUM");
             const after = process.memoryUsage();
             const analysis: CanonicalPropertyStoreAnalysis = { ...sourceAnalysis(source), uniquePropertyValues: count(database, "property_values"), sqlite: pageUsage(database) };
-            const stats: CanonicalPropertyStoreStats = { storeVersion: 2, sourceKind: "revit", sourceBytes, viewerBootstrapBytes, databaseBytes: fs.statSync(databasePath).size, processingMilliseconds: performance.now() - startedAt, heapUsedDeltaBytes: after.heapUsed - before.heapUsed, rssDeltaBytes: after.rss - before.rss, definitions: count(database, "property_definitions"), propertyValues: analysis.uniquePropertyValues, propertySets: count(database, "property_sets"), types: count(database, "types"), elements: count(database, "elements"), renderObjects: count(database, "render_objects"), levels: count(database, "levels"), analysis };
-            fs.writeFileSync(path.join(directory, CanonicalPropertyStore.manifestFilename), `${JSON.stringify(stats, null, 2)}\n`, "utf8");
-            fs.writeFileSync(path.join(directory, CanonicalPropertyStore.analysisFilename), `${JSON.stringify(analysis, null, 2)}\n`, "utf8");
+            const stats: CanonicalPropertyStoreStats = { storeVersion: 3, sourceKind: "revit", sourceBytes, viewerBootstrapBytes, databaseBytes: fs.statSync(databasePath).size, processingMilliseconds: performance.now() - startedAt, heapUsedDeltaBytes: after.heapUsed - before.heapUsed, rssDeltaBytes: after.rss - before.rss, definitions: count(database, "property_definitions"), propertyValues: analysis.uniquePropertyValues, propertySets: count(database, "property_sets"), types: count(database, "types"), elements: count(database, "elements"), renderObjects: count(database, "render_objects"), levels: count(database, "levels"), analysis };
+            fs.writeFileSync(manifestPath, `${JSON.stringify(stats, null, 2)}\n`, "utf8");
+            fs.writeFileSync(analysisPath, `${JSON.stringify(analysis, null, 2)}\n`, "utf8");
+            completed = true;
             return stats;
         } catch (error) { try { database.exec("ROLLBACK"); } catch { /* no active transaction */ } throw error; }
-        finally { database.close(); }
+        finally {
+            try { database.close(); }
+            finally {
+                if (!completed) [databasePath, manifestPath, analysisPath].forEach((artifact) => fs.rmSync(artifact, { force: true }));
+            }
+        }
     }
 
     getElementProperties(databasePath: string, sourceElementId: string): StoredElementProperties | undefined {
-        const database = new DatabaseSync(databasePath, { readOnly: true });
+        const { database } = openPropertyStore(databasePath);
         try {
             const element = database.prepare("SELECT logical_element_id, source_element_id, type_id, category, family, type_name, instance_property_set_id FROM elements WHERE source_element_id = ?").get(sourceElementId) as { logical_element_id: string; source_element_id: string; type_id: string | null; category: string; family: string | null; type_name: string | null; instance_property_set_id: number } | undefined;
             if (!element) return undefined;
@@ -207,7 +249,7 @@ export class CanonicalPropertyStore {
     }
 
     getElementPropertiesForRenderObject(databasePath: string, renderObjectId: string): StoredElementProperties | undefined {
-        const database = new DatabaseSync(databasePath, { readOnly: true });
+        const { database } = openPropertyStore(databasePath);
         let sourceElementId: string | undefined;
         try { sourceElementId = (database.prepare("SELECT source_element_id FROM render_objects WHERE render_object_id = ?").get(renderObjectId) as { source_element_id: string } | undefined)?.source_element_id; }
         finally { database.close(); }
@@ -215,9 +257,16 @@ export class CanonicalPropertyStore {
     }
 
     getPropertyDefinitions(databasePath: string): CanonicalPropertyDefinition[] {
-        const database = new DatabaseSync(databasePath, { readOnly: true });
+        const { database, version } = openPropertyStore(databasePath);
         try {
-            const rows = database.prepare(`
+            const rows = database.prepare(version === 3 ? `
+                SELECT parameter_id, name, storage_type, unit_type_id, 'instance' AS scope
+                FROM property_definitions WHERE (usage_mask & 1) != 0
+                UNION ALL
+                SELECT parameter_id, name, storage_type, unit_type_id, 'type' AS scope
+                FROM property_definitions WHERE (usage_mask & 2) != 0
+                ORDER BY scope, name, parameter_id
+            ` : `
                 SELECT DISTINCT definition.parameter_id, definition.name, definition.storage_type, definition.unit_type_id, sets.scope
                 FROM property_definitions definition
                 JOIN property_values value ON value.definition_key = definition.definition_key
@@ -227,12 +276,12 @@ export class CanonicalPropertyStore {
             `).all() as Array<{ parameter_id: string; name: string; storage_type: string | null; unit_type_id: string | null; scope: "instance" | "type" }>;
             return [
                 ...rows.map((row) => ({
-                propertyDefinitionId: `canonical:${row.scope}:${row.parameter_id}`,
-                propertySetName: row.scope === "instance" ? "Instance Parameters" : "Type Parameters",
-                displayName: row.name,
-                valueType: row.storage_type,
-                unit: row.unit_type_id,
-                scope: row.scope,
+                    propertyDefinitionId: `canonical:${row.scope}:${row.parameter_id}`,
+                    propertySetName: row.scope === "instance" ? "Instance Parameters" : "Type Parameters",
+                    displayName: row.name,
+                    valueType: row.storage_type,
+                    unit: row.unit_type_id,
+                    scope: row.scope,
                 })),
                 ...(count(database, "elements") === 0 ? [] : (["category", "family", "type"] as const).map((facet) => ({
                     propertyDefinitionId: `canonical:facet:${facet}`,
@@ -247,20 +296,17 @@ export class CanonicalPropertyStore {
     }
 
     getPropertyValues(databasePath: string, definitionId: string): CanonicalPropertyValue[] {
-        const facet = canonicalFacet(definitionId);
-        if (facet) {
-            const column = elementFacetColumn(facet);
-            const database = new DatabaseSync(databasePath, { readOnly: true });
-            try {
-                return (database.prepare(`SELECT e.${column} AS value, COUNT(DISTINCT e.source_element_id) AS count FROM elements e WHERE e.${column} IS NOT NULL AND e.${column} <> '' GROUP BY e.${column} ORDER BY e.${column}`).all() as Array<{ value: string; count: number }>).map((row) => ({ valueId: `value:${encodeURIComponent(row.value)}`, displayValue: row.value, count: Number(row.count) }));
-            } finally { database.close(); }
-        }
-        const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
-        if (!match) return [];
-        const scope = match[1] as "instance" | "type";
-        const parameterId = match[2]!;
-        const database = new DatabaseSync(databasePath, { readOnly: true });
+        const { database } = openPropertyStore(databasePath);
         try {
+            const facet = canonicalFacet(definitionId);
+            if (facet) {
+                const column = elementFacetColumn(facet);
+                return (database.prepare(`SELECT e.${column} AS value, COUNT(DISTINCT e.source_element_id) AS count FROM elements e WHERE e.${column} IS NOT NULL AND e.${column} <> '' GROUP BY e.${column} ORDER BY e.${column}`).all() as Array<{ value: string; count: number }>).map((row) => ({ valueId: `value:${encodeURIComponent(row.value)}`, displayValue: row.value, count: Number(row.count) }));
+            }
+            const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
+            if (!match) return [];
+            const scope = match[1] as "instance" | "type";
+            const parameterId = match[2]!;
             const joins = scope === "instance" ? "JOIN elements e ON e.instance_property_set_id = sets.property_set_id" : "JOIN types t ON t.property_set_id = sets.property_set_id JOIN elements e ON e.type_id = t.type_id";
             const rows = database.prepare(`SELECT value.property_value_id, value.raw_value_json, dictionary.value AS display_value, COUNT(DISTINCT e.source_element_id) AS count FROM property_definitions d JOIN property_values value ON value.definition_key=d.definition_key JOIN property_set_values sv ON sv.property_value_id=value.property_value_id JOIN property_sets sets ON sets.property_set_id=sv.property_set_id ${joins} LEFT JOIN string_dictionary dictionary ON dictionary.string_id=value.display_string_id WHERE d.parameter_id=? AND sets.scope=? GROUP BY value.property_value_id ORDER BY COALESCE(dictionary.value,value.raw_value_json)`).all(parameterId, scope) as Array<{property_value_id:number;raw_value_json:string;display_value:string|null;count:number}>;
             return rows.map((row) => { const raw = JSON.parse(row.raw_value_json) as unknown; return { valueId: `value:${row.property_value_id}`, displayValue: row.display_value ?? defaultDisplayValue(raw) ?? "", count: Number(row.count) }; });
@@ -268,33 +314,24 @@ export class CanonicalPropertyStore {
     }
 
     getMatchingViewerObjectIds(databasePath: string, definitionId: string, valueIds: string[]): string[] {
-        const facet = canonicalFacet(definitionId);
-        if (facet) {
-            const column = elementFacetColumn(facet);
-            const values = valueIds.map((id) => /^value:(.*)$/.exec(id)?.[1]).filter((value): value is string => value !== undefined).map(decodeURIComponent);
-            if (values.length === 0) return [];
-            const database = new DatabaseSync(databasePath, { readOnly: true });
-            try {
+        const { database } = openPropertyStore(databasePath);
+        try {
+            const facet = canonicalFacet(definitionId);
+            if (facet) {
+                const column = elementFacetColumn(facet);
+                const values = valueIds.map((id) => /^value:(.*)$/.exec(id)?.[1]).filter((value): value is string => value !== undefined).map(decodeURIComponent);
+                if (values.length === 0) return [];
                 const marks = values.map(() => "?").join(",");
                 return (database.prepare(`SELECT DISTINCT r.viewer_object_id FROM elements e JOIN render_objects r ON r.source_element_id=e.source_element_id WHERE e.${column} IN (${marks})`).all(...values) as Array<{ viewer_object_id: string }>).map((row) => row.viewer_object_id);
-            } finally { database.close(); }
-        }
-        const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
-        const ids = valueIds.map((id) => Number(/^value:(\d+)$/.exec(id)?.[1])).filter(Number.isInteger);
-        if (!match || ids.length === 0) return [];
-        const scope = match[1] as "instance" | "type";
-        const parameterId = match[2]!;
-        const database = new DatabaseSync(databasePath, { readOnly: true });
-        try {
+            }
+            const match = /^canonical:(instance|type):(.+)$/.exec(definitionId);
+            const ids = valueIds.map((id) => Number(/^value:(\d+)$/.exec(id)?.[1])).filter(Number.isInteger);
+            if (!match || ids.length === 0) return [];
+            const scope = match[1] as "instance" | "type";
+            const parameterId = match[2]!;
             const joins = scope === "instance" ? "JOIN elements e ON e.instance_property_set_id = sets.property_set_id" : "JOIN types t ON t.property_set_id = sets.property_set_id JOIN elements e ON e.type_id = t.type_id";
             const marks = ids.map(() => "?").join(",");
             return (database.prepare(`SELECT DISTINCT r.viewer_object_id FROM property_definitions d JOIN property_values value ON value.definition_key=d.definition_key JOIN property_set_values sv ON sv.property_value_id=value.property_value_id JOIN property_sets sets ON sets.property_set_id=sv.property_set_id ${joins} JOIN render_objects r ON r.source_element_id=e.source_element_id WHERE d.parameter_id=? AND sets.scope=? AND value.property_value_id IN (${marks})`).all(parameterId, scope, ...ids) as Array<{viewer_object_id:string}>).map((row) => row.viewer_object_id);
         } finally { database.close(); }
-    }
-
-    getFacetValues(databasePath: string, facet: "category" | "family" | "type"): string[] {
-        const database = new DatabaseSync(databasePath, { readOnly: true });
-        try { return (database.prepare("SELECT DISTINCT value FROM facet_index WHERE facet = ? ORDER BY value").all(facet) as Array<{ value: string }>).map((entry) => entry.value); }
-        finally { database.close(); }
     }
 }
